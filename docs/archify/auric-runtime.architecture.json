@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "AuricTerminal — Runtime Architecture",
+    "subtitle": "XAU/USD Trading Terminal · Multi-Engine + Kronos AI",
+    "quality_profile": "showcase",
+    "visual_preset": "signal-flow",
+    "views": [
+      { "id": "primary-path", "label": "Primary Market → Risk → Execution", "focus": ["browser", "gateway", "risk", "journal", "mt5"], "note": "Market feed → risk gate → execution → journal." },
+      { "id": "multi-symbol", "label": "Multi-Symbol Engines", "focus": ["gateway", "engines", "kronos", "telegram"], "note": "SymbolEngine per symbol with shared kill-switch and Kronos cache." },
+      { "id": "data-sources", "label": "Market Data Sources", "focus": ["mt5", "twelvedata", "demo", "gateway"], "note": "MT5 → TwelveData → Demo fallback, normalized on the quote bus." }
+    ]
+  },
+  "components": [
+    { "id": "browser", "type": "frontend", "label": "Auric Web", "sublabel": "React 19 · Vite · Charts", "pos": [30, 180], "size": [175, 64], "tag": "PWA" },
+    { "id": "gateway", "type": "backend", "label": "FastAPI Gateway", "sublabel": "server.py · :8000", "pos": [250, 180], "size": [155, 64] },
+    { "id": "ws", "type": "messagebus", "label": "Quote Bus", "sublabel": "WS /ws/market", "pos": [250, 310], "size": [155, 60] },
+    { "id": "risk", "type": "security", "label": "RiskManager", "sublabel": "lot / exposure / halt", "pos": [470, 80], "size": [150, 64], "tag": "kill switch" },
+    { "id": "engines", "type": "backend", "label": "SymbolEngine[]", "sublabel": "multi_engine.py", "pos": [470, 190], "size": [150, 64] },
+    { "id": "kronos", "type": "backend", "label": "Kronos Forecast", "sublabel": "CPU inference", "pos": [470, 320], "size": [150, 60], "tag": "AI veto" },
+    { "id": "strategies", "type": "backend", "label": "Strategy + Sizing", "sublabel": "engine.py · 19 × 7", "pos": [470, 430], "size": [150, 60] },
+    { "id": "journal", "type": "database", "label": "SQLite Journal", "sublabel": "auric.db", "pos": [700, 190], "size": [145, 60] },
+    { "id": "telegram", "type": "external", "label": "Telegram", "sublabel": "tg_notify", "pos": [700, 320], "size": [145, 60] },
+    { "id": "mt5", "type": "external", "label": "MetaTrader 5", "sublabel": "MT5 terminal", "pos": [900, 80], "size": [145, 60] },
+    { "id": "twelvedata", "type": "external", "label": "Twelve Data", "sublabel": "REST candles", "pos": [900, 190], "size": [145, 60] },
+    { "id": "demo", "type": "external", "label": "Demo Feed", "sublabel": "labelled", "pos": [900, 320], "size": [145, 60] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "Trust: Browser untrusted · secrets server-side", "wraps": ["gateway", "risk", "engines", "kronos", "strategies", "journal", "ws"], "pad": 14 },
+    { "kind": "security-group", "label": "Execution Guard: LIVE only if ENABLE_LIVE_TRADING + UI LIVE", "wraps": ["risk", "engines", "mt5"] }
+  ],
+  "connections": [
+    { "id": "browser-api", "from": "browser", "to": "gateway", "label": "REST /api/*", "variant": "emphasis" },
+    { "id": "gateway-ws", "from": "gateway", "to": "ws", "label": "broadcast", "labelAt": [328, 268] },
+    { "id": "ws-push", "from": "ws", "to": "browser", "label": "tick stream", "fromSide": "left", "toSide": "bottom", "via": [[180, 340], [180, 250]] },
+    { "id": "gateway-risk", "from": "gateway", "to": "risk", "label": "risk check", "labelAt": [382, 118] },
+    { "id": "risk-engines", "from": "risk", "to": "engines", "variant": "security" },
+    { "id": "engines-kronos", "from": "engines", "to": "kronos", "label": "confirm", "labelAt": [556, 276] },
+    { "id": "engines-strat", "from": "engines", "to": "strategies", "label": "signal + sizing", "fromSide": "left", "toSide": "left", "via": [[430, 222], [430, 460]] },
+    { "id": "engines-journal", "from": "engines", "to": "journal", "label": "journal.add", "labelAt": [648, 166] },
+    { "id": "gateway-journal", "from": "gateway", "to": "journal", "label": "paper orders", "fromSide": "bottom", "toSide": "bottom", "via": [[328, 400], [772, 400]] },
+    { "id": "mt5-gateway", "from": "mt5", "to": "gateway", "label": "MT5 ticks", "fromSide": "left", "toSide": "top", "via": [[825, 110], [325, 110]] },
+    { "id": "td-gateway", "from": "twelvedata", "to": "gateway", "label": "price + candles", "fromSide": "left", "toSide": "right", "via": [[825, 220], [825, 212], [405, 212]] },
+    { "id": "demo-gateway", "from": "demo", "to": "gateway", "label": "fallback", "variant": "dashed", "fromSide": "left", "toSide": "bottom", "via": [[825, 350], [325, 350]] },
+    { "id": "engines-tg", "from": "engines", "to": "telegram", "label": "alerts", "variant": "dashed", "labelAt": [648, 278] }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Reliable", "items": ["Risk gate before every order · server re-check", "MT5 → TwelveData → Demo (never mislabelled)", "Kill switch halts + cancels + flattens first"] },
+    { "dot": "emerald", "title": "Clean", "items": ["Typed FastAPI + SymbolEngine per symbol", "engine.py isolated · backtest Monte Carlo", "SQLite → Postgres/Timescale path"] },
+    { "dot": "amber", "title": "Beautiful", "items": ["React + Tailwind + lightweight-charts", "Resizable panes · flash tick · session chips", "Archify maps as standalone HTML"] }
+  ]
+}

@@ -1,0 +1,138 @@
+@import "tailwindcss";
+
+@theme {
+  /* AuricTerminal — clean dark palette (reliable + beautiful) */
+  --color-ink-950: #06080f;
+  --color-ink-900: #0a0e1a;
+  --color-ink-800: #0f1220;
+  --color-ink-700: #1e2540;
+  --color-ink-600: #2a3458;
+  --color-fg-100: #e8e8ec;
+  --color-fg-200: #c5cad4;
+  --color-fg-300: #a8b0c0;
+  --color-fg-400: #8a93a8;
+  --color-fg-500: #6b748a;
+  --color-gold-400: #c9a227;
+  --color-gold-300: #debe5a;
+  --color-gold-600: #8a6e1a;
+  --color-bull-500: #16c784;
+  --color-bear-500: #ea3943;
+  --color-bull: #16c784;
+  --color-bear: #ea3943;
+  --color-background: #06080f;
+  --color-background-alt: #0a0e1a;
+  --color-background-muted: #0f1220;
+  --color-foreground: #e8e8ec;
+  --color-foreground-muted: #8a93a8;
+  --color-foreground-dim: #1e2540;
+  --color-accent: #c9a227;
+  --color-accent-muted: #8a6e1a;
+  --color-status-ok: #16c784;
+  --color-status-warning: #c9a227;
+  --color-status-error: #ea3943;
+  --color-status-disabled: #6b748a;
+
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Consolas, monospace;
+}
+
+*,
+*::before,
+*::after {
+  border-width: 0;
+  border-style: solid;
+  border-color: var(--color-ink-700);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  background-color: var(--color-ink-950);
+  color: var(--color-fg-200);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  letter-spacing: -0.02em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  margin: 0;
+  padding: 0;
+}
+
+/* Monospace for numeric */
+.tnum,
+.numeric,
+[data-numeric] {
+  font-family: var(--font-mono) !important;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+/* Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-thumb {
+  background-color: var(--color-ink-700);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-track {
+  background-color: transparent;
+}
+
+@keyframes flash-green {
+  0% { color: var(--color-bull-500); text-shadow: 0 0 10px rgba(22,199,132,0.5); }
+  100% { color: inherit; text-shadow: none; }
+}
+@keyframes flash-red {
+  0% { color: var(--color-bear-500); text-shadow: 0 0 10px rgba(234,57,67,0.5); }
+  100% { color: inherit; text-shadow: none; }
+}
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.6; transform: scale(0.85); }
+}
+
+.animate-flash-up { animation: flash-green 0.45s ease-out; }
+.animate-flash-down { animation: flash-red 0.45s ease-out; }
+.pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+
+/* Beautiful card elevation */
+.card {
+  background: linear-gradient(180deg, rgba(15,18,32,0.9), rgba(10,14,26,0.95));
+  border: 1px solid rgba(30,37,64,0.8);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.04);
+}
+
+/* Focus ring — reliable a11y */
+*:focus-visible {
+  outline: 2px solid var(--color-gold-400);
+  outline-offset: 2px;
+}
+
+/* Tooltip */
+.tooltip .tooltip-text {
+  visibility: hidden;
+  width: 220px;
+  background-color: var(--color-ink-900);
+  color: var(--color-fg-100);
+  border-radius: 8px;
+  padding: 8px 10px;
+  position: absolute;
+  z-index: 1000;
+  bottom: 125%;
+  left: 50%;
+  margin-left: -110px;
+  opacity: 0;
+  transition: opacity 0.2s;
+  border: 1px solid var(--color-ink-700);
+  font-size: 11px;
+  box-shadow: 0 12px 32px rgba(0,0,0,0.5);
+}
+.tooltip:hover .tooltip-text { visibility: visible; opacity: 1; }
+
+button, [role="button"], a { cursor: pointer; }
+
+[id^="modal-"].open { display: flex !important; }

@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "AuricTerminal — Order & Kill-Switch Sequence",
+    "subtitle": "Paper tick → Live MT5 execution with risk gates and Kronos veto",
+    "quality_profile": "showcase",
+    "visual_preset": "signal-flow"
+  },
+  "participants": [
+    { "id": "browser", "label": "Browser", "type": "actor" },
+    { "id": "gateway", "label": "FastAPI Gateway", "type": "service" },
+    { "id": "risk", "label": "RiskManager", "type": "service" },
+    { "id": "kronos", "label": "Kronos Forecast", "type": "service" },
+    { "id": "mt5", "label": "MT5 Terminal", "type": "external" },
+    { "id": "journal", "label": "SQLite Journal", "type": "database" },
+    { "id": "tg", "label": "Telegram", "type": "external" }
+  ],
+  "messages": [
+    { "from": "browser", "to": "gateway", "label": "WS connect /ws/market", "style": "solid" },
+    { "from": "gateway", "to": "browser", "label": "tick (price, spread, source)", "style": "return" },
+    { "from": "gateway", "to": "risk", "label": "risk.check(lots, exposure, spread)" },
+    { "from": "risk", "to": "gateway", "label": "allowed / reasons", "style": "return" },
+    { "from": "gateway", "to": "kronos", "label": "forecast_from_candles (lookback 400)", "style": "dashed" },
+    { "from": "kronos", "to": "gateway", "label": "direction + confidence", "style": "return" },
+    { "from": "gateway", "to": "gateway", "label": "_kronos_agrees(side) → veto/confirm" },
+    { "from": "browser", "to": "gateway", "label": "POST /api/orders {side, lots, PAPER/LIVE}", "style": "solid" },
+    { "from": "gateway", "to": "risk", "label": "re-check lots & daily loss" },
+    { "from": "risk", "to": "gateway", "label": "allowed?", "style": "return" },
+    { "from": "gateway", "to": "journal", "label": "paper: journal.add(...)", "style": "dashed" },
+    { "from": "gateway", "to": "mt5", "label": "live: TRADE_ACTION_DEAL (if ENABLE_LIVE_TRADING)", "style": "solid" },
+    { "from": "mt5", "to": "gateway", "label": "retcode DONE / REJECT", "style": "return" },
+    { "from": "gateway", "to": "journal", "label": "live: journal.add(entry, ticket)", "style": "dashed" },
+    { "from": "gateway", "to": "tg", "label": "tg_notify(entry / pyramid)", "style": "dashed" },
+    { "from": "browser", "to": "gateway", "label": "POST /api/kill (hold 1.5s)", "style": "solid" },
+    { "from": "gateway", "to": "risk", "label": "risk.kill() → halted", "style": "solid" },
+    { "from": "gateway", "to": "mt5", "label": "cancel pending + flatten positions", "style": "solid" },
+    { "from": "gateway", "to": "journal", "label": "kill audit entry", "style": "dashed" },
+    { "from": "gateway", "to": "tg", "label": "KILL SWITCH broadcast", "style": "dashed" },
+    { "from": "gateway", "to": "browser", "label": "closed + cancelled + halted", "style": "return" }
+  ]
+}

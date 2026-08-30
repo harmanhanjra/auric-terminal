@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "AuricTerminal — Runtime Architecture",
+    "subtitle": "XAU/USD · FastAPI + React + Kronos AI · Clean / Reliable / Beautiful",
+    "quality_profile": "showcase",
+    "views": [
+      { "id": "primary-path", "label": "Primary Market → Risk → Journal", "focus": ["browser", "gateway", "engine", "journal"], "note": "Follow the authoritative path: browser → gateway → risk → engine → journal." },
+      { "id": "risk-kronos", "label": "Risk + Kronos Veto", "focus": ["risk", "engine", "kronos"], "note": "RiskManager gates lots/exposure; Kronos confirms or vetoes every signal." },
+      { "id": "market-sources", "label": "Market Sources + Async Alerts", "focus": ["gateway", "mt5", "engine", "telegram", "strategy"], "note": "MT5 → TwelveData → Demo fallback; async Telegram and strategy sizing." }
+    ]
+  },
+  "components": [
+    { "id": "browser", "type": "external", "label": "Auric Web", "sublabel": "React 19 · Vite", "pos": [40, 300], "size": [130, 60], "tag": "lightweight-charts" },
+    { "id": "risk", "type": "security", "label": "RiskManager", "sublabel": "lot / exposure / halt", "pos": [40, 110], "size": [130, 64], "tag": "kill switch" },
+    { "id": "gateway", "type": "cloud", "label": "Quote Bus", "sublabel": "WS /ws/market", "pos": [250, 300], "size": [130, 60] },
+    { "id": "enginegw", "type": "cloud", "label": "FastAPI Gateway", "sublabel": "server.py :8000", "pos": [460, 300], "size": [130, 60] },
+    { "id": "engine", "type": "backend", "label": "SymbolEngine[]", "sublabel": "multi_engine.py", "pos": [670, 300], "size": [130, 60] },
+    { "id": "kronos", "type": "database", "label": "Kronos AI", "sublabel": "forecast cache", "pos": [670, 150], "size": [130, 60], "tag": "confirm/veto" },
+    { "id": "journal", "type": "database", "label": "SQLite Journal", "sublabel": "auric.db", "pos": [880, 300], "size": [130, 60] },
+    { "id": "mt5", "type": "cloud", "label": "Demo Feed", "sublabel": "labelled fallback", "pos": [250, 440], "size": [130, 60], "tag": "never live" },
+    { "id": "telegram", "type": "messagebus", "label": "Telegram", "sublabel": "tg_notify", "pos": [670, 440], "size": [130, 60] },
+    { "id": "strategy", "type": "backend", "label": "Strategy Engine", "sublabel": "19 × 7 sizing", "pos": [880, 440], "size": [130, 60] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "Trust: Browser untrusted · secrets server-side · Demo always labelled", "wraps": ["gateway", "enginegw", "engine", "kronos", "journal", "mt5", "telegram", "strategy"] },
+    { "kind": "security-group", "label": "Execution Guard: LIVE only if ENABLE_LIVE_TRADING + UI LIVE", "wraps": ["enginegw", "engine"] }
+  ],
+  "connections": [
+    { "id": "browser-gateway", "from": "browser", "to": "gateway", "label": "HTTPS", "variant": "emphasis" },
+    { "id": "risk-verify", "from": "risk", "to": "engine", "label": "check lots", "variant": "security", "fromSide": "right", "toSide": "top", "via": [[630, 142], [630, 246], [735, 246]] },
+    { "id": "gateway-enginegw", "from": "gateway", "to": "enginegw" },
+    { "id": "mt5-assets", "from": "gateway", "to": "mt5", "label": "fallback", "variant": "dashed", "fromSide": "bottom", "toSide": "top", "labelDy": 58 },
+    { "id": "enginegw-engine", "from": "enginegw", "to": "engine" },
+    { "id": "engine-kronos", "from": "engine", "to": "kronos", "label": "confirm", "fromSide": "top", "toSide": "bottom", "labelDy": -68 },
+    { "id": "engine-journal", "from": "engine", "to": "journal", "label": "journal.add" },
+    { "id": "engine-telegram", "from": "engine", "to": "telegram", "label": "alerts", "variant": "dashed", "fromSide": "bottom", "toSide": "top", "labelDy": 58 },
+    { "id": "telegram-strategy", "from": "telegram", "to": "strategy" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Reliable", "items": ["Risk gate before every order · server-side re-check", "MT5 → TwelveData → Demo priority, never mislabelled", "Kill switch halts + cancels + flattens before new entry"] },
+    { "dot": "emerald", "title": "Clean", "items": ["Typed FastAPI gateway + SymbolEngine per symbol", "engine.py 19 strategies × 7 sizers isolated", "SQLite → Postgres/Timescale scaling path"] },
+    { "dot": "amber", "title": "Beautiful", "items": ["React + Tailwind + lightweight-charts dark theme", "Resizable panes · flash tick · session chips", "Archify showcase maps as standalone HTML"] }
+  ]
+}

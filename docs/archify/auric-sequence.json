@@ -1,0 +1,277 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "AuricTerminal \u2014 Order & Risk Sequence",
+    "output": "examples/sequence-cache-miss-request.html",
+    "viewBox": [
+      820,
+      760
+    ],
+    "animation": "trace",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "order-risk",
+        "label": "Order & Risk",
+        "focus": [
+          "browser",
+          "gateway",
+          "engine",
+          "risk"
+        ],
+        "note": "Browser order through gateway risk check."
+      },
+      {
+        "id": "kronos-fallback",
+        "label": "Kronos Veto",
+        "focus": [
+          "engine",
+          "kronos",
+          "journal"
+        ],
+        "note": "Kronos confirm/veto before journal."
+      },
+      {
+        "id": "execution",
+        "label": "Execution + Journal",
+        "focus": [
+          "journal",
+          "engine",
+          "kronos",
+          "telegram",
+          "gateway",
+          "browser"
+        ],
+        "note": "Execution, journal and Telegram alert."
+      }
+    ],
+    "subtitle": "Browser \u2192 Gateway \u2192 Risk \u2192 MT5/Journal with Kronos veto"
+  },
+  "participants": [
+    {
+      "id": "browser",
+      "type": "external",
+      "label": "Browser",
+      "sublabel": "React"
+    },
+    {
+      "id": "gateway",
+      "type": "frontend",
+      "label": "Gateway",
+      "sublabel": "React UI"
+    },
+    {
+      "id": "engine",
+      "type": "backend",
+      "label": "Engine",
+      "sublabel": "request handler"
+    },
+    {
+      "id": "risk",
+      "type": "security",
+      "label": "Risk",
+      "sublabel": "JWT verify"
+    },
+    {
+      "id": "kronos",
+      "type": "database",
+      "label": "Kronos",
+      "sublabel": "cache"
+    },
+    {
+      "id": "journal",
+      "type": "database",
+      "label": "Journal",
+      "sublabel": "source of truth"
+    },
+    {
+      "id": "telegram",
+      "type": "messagebus",
+      "label": "Telegram",
+      "sublabel": "async event"
+    }
+  ],
+  "segments": [
+    {
+      "from": 150,
+      "to": 295,
+      "label": "Order"
+    },
+    {
+      "from": 315,
+      "to": 505,
+      "label": "Risk + Kronos"
+    },
+    {
+      "from": 525,
+      "to": 665,
+      "label": "Execution + Journal"
+    }
+  ],
+  "messages": [
+    {
+      "id": "open-page",
+      "from": "browser",
+      "to": "gateway",
+      "y": 185,
+      "label": "open page",
+      "variant": "default"
+    },
+    {
+      "id": "dashboard-request",
+      "from": "gateway",
+      "to": "engine",
+      "y": 228,
+      "label": "GET /dashboard",
+      "variant": "emphasis"
+    },
+    {
+      "id": "verify-jwt",
+      "from": "engine",
+      "to": "risk",
+      "y": 270,
+      "label": "verify JWT",
+      "variant": "security"
+    },
+    {
+      "id": "auth-claims",
+      "from": "risk",
+      "to": "engine",
+      "y": 305,
+      "label": "claims ok",
+      "variant": "return"
+    },
+    {
+      "id": "cache-read",
+      "from": "engine",
+      "to": "kronos",
+      "y": 354,
+      "label": "read cache",
+      "variant": "default"
+    },
+    {
+      "id": "cache-miss",
+      "from": "kronos",
+      "to": "engine",
+      "y": 391,
+      "label": "miss",
+      "variant": "return"
+    },
+    {
+      "id": "profile-query",
+      "from": "engine",
+      "to": "journal",
+      "y": 443,
+      "label": "query profile + metrics",
+      "variant": "emphasis"
+    },
+    {
+      "id": "profile-rows",
+      "from": "journal",
+      "to": "engine",
+      "y": 489,
+      "label": "rows",
+      "variant": "return"
+    },
+    {
+      "id": "cache-write",
+      "from": "engine",
+      "to": "kronos",
+      "y": 536,
+      "label": "set cache",
+      "variant": "dashed"
+    },
+    {
+      "id": "trace-emit",
+      "from": "engine",
+      "to": "telegram",
+      "y": 580,
+      "label": "emit trace",
+      "variant": "dashed"
+    },
+    {
+      "id": "dashboard-response",
+      "from": "engine",
+      "to": "gateway",
+      "y": 625,
+      "label": "200 JSON",
+      "variant": "return"
+    },
+    {
+      "id": "page-render",
+      "from": "gateway",
+      "to": "browser",
+      "y": 662,
+      "label": "render",
+      "variant": "return"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "gateway",
+      "from": 220,
+      "to": 668,
+      "type": "frontend"
+    },
+    {
+      "participant": "engine",
+      "from": 228,
+      "to": 632,
+      "type": "backend"
+    },
+    {
+      "participant": "risk",
+      "from": 265,
+      "to": 310,
+      "type": "security"
+    },
+    {
+      "participant": "kronos",
+      "from": 349,
+      "to": 398,
+      "type": "database"
+    },
+    {
+      "participant": "journal",
+      "from": 438,
+      "to": 496,
+      "type": "database"
+    },
+    {
+      "participant": "telegram",
+      "from": 575,
+      "to": 630,
+      "type": "messagebus"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Happy Path",
+      "items": [
+        "The main request is Web App -> API -> data source -> response",
+        "Return messages are quieter than forward calls",
+        "Activation bars make ownership duration visible"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Policy + Fallback",
+      "items": [
+        "JWT verification is colored as a security interaction",
+        "Cache miss is visible without overpowering the main path",
+        "Database access only appears after cache fallback"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Async Trace",
+      "items": [
+        "Trace emission is dashed and secondary",
+        "It does not block the response path",
+        "The diagram separates user-facing latency from observability"
+      ]
+    }
+  ]
+}

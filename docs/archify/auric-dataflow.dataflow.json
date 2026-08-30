@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "AuricTerminal — Market Data Flow",
+    "subtitle": "Normalized quote bus → chart, depth, backtest, and Kronos forecast",
+    "quality_profile": "showcase",
+    "visual_preset": "signal-flow"
+  },
+  "nodes": [
+    { "id": "mt5", "label": "MT5 Tick / Rates", "type": "source", "sublabel": "symbol_info_tick · copy_rates" },
+    { "id": "td", "label": "Twelve Data", "type": "source", "sublabel": "price + time_series" },
+    { "id": "demo", "label": "Demo Generator", "type": "source", "sublabel": "random walk · 5000 base" },
+    { "id": "normalize", "label": "Normalize", "type": "transform", "sublabel": "{bid, ask, price, spread, source}" },
+    { "id": "bus", "label": "Quote Bus", "type": "store", "sublabel": "latest[] · broadcast()" },
+    { "id": "chart", "label": "Chart + Dock", "type": "consumer", "sublabel": "ChartPanel · lightweight-charts" },
+    { "id": "candle", "label": "Candles API", "type": "transform", "sublabel": "/api/candles → OHLCV" },
+    { "id": "backtest", "label": "Backtest Engine", "type": "transform", "sublabel": "backtest · optimize · Monte Carlo" },
+    { "id": "kronos", "label": "Kronos AI", "type": "transform", "sublabel": "forecast_from_candles" },
+    { "id": "journal", "label": "Journal Store", "type": "store", "sublabel": "SQLite · /api/journal" },
+    { "id": "risk", "label": "Risk Gate", "type": "transform", "sublabel": "allowed / blocked" }
+  ],
+  "flows": [
+    { "from": "mt5", "to": "normalize", "label": "bid/ask/timemsc" },
+    { "from": "td", "to": "normalize", "label": "price JSON" },
+    { "from": "demo", "to": "normalize", "label": "synthetic" },
+    { "from": "normalize", "to": "bus", "label": "tick per symbol" },
+    { "from": "bus", "to": "chart", "label": "WS /ws/market" },
+    { "from": "bus", "to": "kronos", "label": "candles 400 bars", "variant": "dashed" },
+    { "from": "kronos", "to": "risk", "label": "direction + conf", "variant": "dashed" },
+    { "from": "mt5", "to": "candle", "label": "copy_rates_from_pos" },
+    { "from": "td", "to": "candle", "label": "time_series fallback" },
+    { "from": "candle", "to": "backtest", "label": "OHLCV series" },
+    { "from": "backtest", "to": "journal", "label": "equity + trades", "variant": "dashed" },
+    { "from": "risk", "to": "journal", "label": "blocked reasons" }
+  ],
+  "boundaries": [
+    { "label": "Trust: MT5/TwelveData → normalized · Demo always labelled", "nodes": ["normalize", "bus", "candle"] },
+    { "label": "Durability: SQLite → Postgres/Timescale + Redis pub/sub (scale path)", "nodes": ["bus", "journal"] }
+  ]
+}
