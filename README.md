@@ -117,11 +117,12 @@ MT5_LOGIN=12345678
 MT5_PASSWORD=your_password
 MT5_SERVER=Broker-Server
 ENABLE_LIVE_TRADING=false
+AURIC_LIVE_API_KEY=generate-a-long-random-secret
 MAX_LOT=0.20
 MAX_DAILY_LOSS=500
 ```
 
-Start the gateway and validate quotes, account data, symbol precision, filling mode and paper orders against an MT5 demo account. Only after validation should `ENABLE_LIVE_TRADING=true` be considered.
+Start the gateway and validate quotes, account data, symbol precision, filling mode and paper orders against an MT5 demo account. Only after validation should `ENABLE_LIVE_TRADING=true` be considered. Live order and live kill-switch requests also require the `X-Auric-Key` header to match `AURIC_LIVE_API_KEY`; if the key is not configured, live mutations fail closed.
 
 ## Main API
 
