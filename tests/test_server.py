@@ -157,6 +157,26 @@ def test_order_live_disabled(client):
     assert r.status_code == 403
 
 
+def test_live_order_requires_execution_key(client, monkeypatch):
+    import server
+    monkeypatch.setattr(server, "LIVE_ENABLED", True)
+    monkeypatch.setattr(server, "LIVE_API_KEY", "test-secret-key")
+    r = client.post("/api/orders", json={
+        "side": "sell", "lots": 0.2, "stop_loss": None, "take_profit": None,
+        "mode": "live", "client_order_id": "test-order-auth"})
+    assert r.status_code == 401
+
+
+def test_live_execution_fails_closed_without_configured_key(client, monkeypatch):
+    import server
+    monkeypatch.setattr(server, "LIVE_ENABLED", True)
+    monkeypatch.setattr(server, "LIVE_API_KEY", "")
+    r = client.post("/api/orders", json={
+        "side": "sell", "lots": 0.2, "stop_loss": None, "take_profit": None,
+        "mode": "live", "client_order_id": "test-order-nokey"})
+    assert r.status_code == 503
+
+
 def test_order_lots_over_server_limit(client):
     r = client.post("/api/orders", json={
         "side": "buy", "lots": 999, "stop_loss": None, "take_profit": None,
