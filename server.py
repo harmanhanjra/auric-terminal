@@ -6,6 +6,7 @@ Real order execution is disabled unless ENABLE_LIVE_TRADING=true.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import Literal
 
 import httpx
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -32,6 +33,7 @@ TD_SYMBOL = os.getenv("TWELVE_DATA_SYMBOL", "XAU/USD")
 TD_KEY = os.getenv("TWELVE_DATA_API_KEY", "")
 SOURCE = os.getenv("MARKET_DATA_SOURCE", "auto").lower()
 LIVE_ENABLED = os.getenv("ENABLE_LIVE_TRADING", "false").lower() == "true"
+LIVE_API_KEY = os.getenv("AURIC_LIVE_API_KEY", "")
 MAX_LOT = float(os.getenv("MAX_LOT", "1.0"))
 MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "500.0"))
 
@@ -67,6 +69,14 @@ latest = {"symbol": SYMBOL, "bid": 0.0, "ask": 0.0, "price": 0.0, "spread": 0.0,
 feed_task: asyncio.Task | None = None
 mt5_ready = False
 risk = RiskManager(daily_loss=MAX_DAILY_LOSS, max_lot=MAX_LOT)
+
+def _require_live_auth(request: Request) -> None:
+    """Fail closed for live mutations unless an explicit API key is configured."""
+    if not LIVE_API_KEY:
+        raise HTTPException(503, "Live execution requires AURIC_LIVE_API_KEY to be configured")
+    supplied = request.headers.get("x-auric-key", "")
+    if not supplied or not hmac.compare_digest(supplied, LIVE_API_KEY):
+        raise HTTPException(401, "Invalid or missing live execution key")
 journal = Journal(str(ROOT / "auric.db"))
 
 MAGIC = 144021
@@ -1030,7 +1040,7 @@ async def ws_market(ws: WebSocket):
         clients.discard(ws)
 
 @app.post("/api/orders")
-async def order(req: OrderRequest):
+async def order(req: OrderRequest, request: Request):
     sym = req.symbol.upper()
     if sym not in ALL_SYMBOLS:
         raise HTTPException(422, f"Symbol {sym} not tracked")
@@ -1060,6 +1070,7 @@ async def order(req: OrderRequest):
                 "fillPrice": price, "source": tick_info.get("source", latest.get("source"))}
     if not LIVE_ENABLED:
         raise HTTPException(403, "Live execution is disabled on the server")
+    _require_live_auth(request)
     if not mt5_ready or not mt5:
         raise HTTPException(503, "MT5 terminal is not connected")
     tick = await asyncio.to_thread(mt5.symbol_info_tick, sym)
@@ -1081,7 +1092,7 @@ async def order(req: OrderRequest):
             "deal": result.deal, "fillPrice": result.price, "clientOrderId": req.client_order_id}
 
 @app.post("/api/kill")
-async def kill_all(symbol: str = SYMBOL, mode: Literal["paper", "live"] = "paper"):
+async def kill_all(request: Request, symbol: str = SYMBOL, mode: Literal["paper", "live"] = "paper"):
     sym = symbol.upper()
     if sym not in ALL_SYMBOLS:
         raise HTTPException(422, f"Symbol {sym} not tracked")
@@ -1091,6 +1102,7 @@ async def kill_all(symbol: str = SYMBOL, mode: Literal["paper", "live"] = "paper
         return {"ok": True, "mode": "paper", "symbol": sym, "closed": 0, "cancelled": 0, "halted": True}
     if not LIVE_ENABLED:
         raise HTTPException(403, "Live execution is disabled on the server")
+    _require_live_auth(request)
     if not mt5_ready or not mt5:
         raise HTTPException(503, "MT5 terminal is not connected")
     closed = cancelled = 0
