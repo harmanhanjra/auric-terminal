@@ -35,14 +35,16 @@ const PERIODS = [
 interface ChartPanelProps {
   quote?: Quote
   activeSymbol?: string
+  onSelectSymbol?: (symbol: string) => void
 }
 
-export function ChartPanel({ quote: _quote, activeSymbol = 'XAUUSD' }: ChartPanelProps) {
+export function ChartPanel({ quote: _quote, activeSymbol = 'XAUUSD', onSelectSymbol }: ChartPanelProps) {
   const [tf, setTf] = useState('M15')
   const [period, setPeriod] = useState('1M')
   const [indicators] = useState<string[]>(['ema20'])
   const [chartType, setChartType] = useState<'Candlestick' | 'Line' | 'Bar' | 'HeikinAshi'>('Candlestick')
   const [showDrawingTools, setShowDrawingTools] = useState(false)
+  const [symbols, setSymbols] = useState<string[]>([activeSymbol])
 
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
@@ -346,7 +348,7 @@ export function ChartPanel({ quote: _quote, activeSymbol = 'XAUUSD' }: ChartPane
                 {symbols.map((symbol, index) => (
                   <div
                     key={index}
-                    onClick={() => setActiveSymbol(symbol)}
+                    onClick={() => onSelectSymbol?.(symbol)}
                     className={clsx(
                       'flex items-center gap-1 p-1 rounded hover:bg-ink-700',
                       activeSymbol === symbol ? 'bg-gold-600/20' : ''

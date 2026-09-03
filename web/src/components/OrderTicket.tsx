@@ -8,12 +8,11 @@ import type { Quote } from '../lib/types'
 interface OrderTicketProps {
   quote: Quote
   live: boolean
-  activeSymbol?: string
 }
 
 const OZ_PER_LOT = 100
 
-export function OrderTicket({ quote, live, activeSymbol }: OrderTicketProps) {
+export function OrderTicket({ quote, live }: OrderTicketProps) {
   const [orderType, setOrderType] = useState<'market' | 'limit' | 'stop'>('market')
   const [lots, setLots] = useState(0.2)
   const [sl, setSl] = useState(4991.2)

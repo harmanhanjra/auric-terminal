@@ -72,7 +72,7 @@ export default function App() {
 
         <div className="flex min-h-0 flex-col overflow-hidden border-r border-ink-700 bg-ink-950">
           <div className="min-h-0 flex-1 overflow-hidden">
-            <ChartPanel quote={quote} activeSymbol={activeSymbol} />
+            <ChartPanel quote={quote} activeSymbol={activeSymbol} onSelectSymbol={setActiveSymbol} />
           </div>
           <div className="h-[280px] shrink-0 overflow-hidden border-t border-ink-700 bg-ink-900">
             <Dock quote={quote} live={live} view={view} onNavigate={openModule} />
@@ -81,11 +81,11 @@ export default function App() {
 
         <aside className="flex min-h-0 flex-col overflow-hidden bg-ink-900">
           <div className="shrink-0 border-b border-ink-700">
-            <OrderTicket quote={quote} live={live} activeSymbol={activeSymbol} />
+            <OrderTicket quote={quote} live={live} />
           </div>
           <div className="min-h-0 flex-1 overflow-auto">
             <DepthPanel quote={quote} />
-            <EngineCard activeSymbol={activeSymbol} />
+            <EngineCard />
           </div>
         </aside>
       </div>

@@ -140,7 +140,11 @@ def test_monte_carlo_none_pnl(client):
     assert r.json()["risk_of_ruin_pct"] >= 0
 
 
-def test_order_paper(client):
+def test_order_paper(client, monkeypatch):
+    import server
+    monkeypatch.setattr(server, "latest", {
+        "XAUUSD": {"bid": 5024.36, "ask": 5024.54, "spread": 0.18, "source": "test"}
+    })
     r = client.post("/api/orders", json={
         "side": "buy", "lots": 0.2, "stop_loss": None, "take_profit": None,
         "mode": "paper", "client_order_id": "test-order-0001"})
