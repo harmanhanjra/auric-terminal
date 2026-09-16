@@ -2,4 +2,9 @@ fastapi==0.116.1
 uvicorn[standard]==0.35.0
 httpx==0.28.1
 pydantic==2.11.7
+python-dotenv==1.2.2
+pandas==2.2.2
+numpy==2.2.6
+yfinance==0.2.66
 # MetaTrader5==5.0.5120  # Install separately on Windows with the MT5 terminal
+# torch -- required only for the Kronos AI forecast engine (CPU build is fine)

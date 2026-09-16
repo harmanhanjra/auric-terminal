@@ -19,7 +19,7 @@ export function SymbolSelector({ active, onChange }: SymbolSelectorProps) {
   const symbols = data?.symbols ?? []
   const list = symbols.length
     ? symbols.map((s) => s.symbol)
-    : ['XAUUSD', 'BTCUSD', 'EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF', 'AUDUSD', 'NZDUSD', 'USDCAD', 'EURGBP', 'EURJPY', 'GBPJPY']
+    : ['XAUUSD', 'BTCUSD', 'EURUSD']
 
   const scrollerRef = useRef<HTMLDivElement>(null)
   const activeRef = useRef<HTMLButtonElement>(null)

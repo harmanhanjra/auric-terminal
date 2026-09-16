@@ -26,10 +26,33 @@ export class ApiError extends Error {
   }
 }
 
+export const LIVE_KEY_STORAGE = 'auric.liveKey'
+
+export function getLiveKey(): string {
+  try {
+    return localStorage.getItem(LIVE_KEY_STORAGE) || ''
+  } catch {
+    return ''
+  }
+}
+
+export function setLiveKey(key: string): void {
+  try {
+    if (key) localStorage.setItem(LIVE_KEY_STORAGE, key)
+    else localStorage.removeItem(LIVE_KEY_STORAGE)
+  } catch {
+    /* ignore */
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const liveKey = getLiveKey()
+  // Server fail-closes live mutations without a matching X-Auric-Key.
+  if (liveKey) headers['X-Auric-Key'] = liveKey
   const res = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
     ...init,
+    headers: { ...headers, ...(init?.headers as Record<string, string> | undefined) },
   })
   if (!res.ok) {
     let detail = res.statusText
@@ -74,8 +97,14 @@ export const api = {
     sizer: string
     spread: number
   }) => request<BacktestResult>('/api/backtest', { method: 'POST', body: JSON.stringify(payload) }),
-  order: (payload: OrderRequest) =>
+  order: (payload: OrderRequest & { symbol?: string }) =>
     request<OrderResult>('/api/orders', { method: 'POST', body: JSON.stringify(payload) }),
+  engineStart: () => request<EngineStatus>('/api/engine/start', { method: 'POST' }),
+  engineStop: () => request<EngineStatus>('/api/engine/stop', { method: 'POST' }),
+  symbolStart: (symbol: string) =>
+    request<EngineStatus>(`/api/symbols/${encodeURIComponent(symbol)}/start`, { method: 'POST' }),
+  symbolStop: (symbol: string) =>
+    request<EngineStatus>(`/api/symbols/${encodeURIComponent(symbol)}/stop`, { method: 'POST' }),
   kill: (mode: 'paper' | 'live') => request<KillResult>(`/api/kill?mode=${mode}`, { method: 'POST' }),
   kronosStatus: () => request<KronosStatus>('/api/kronos/status'),
   kronosDatasets: () => request<{ datasets: KronosDataset[] }>('/api/kronos/datasets'),

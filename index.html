@@ -242,7 +242,7 @@ canvas{width:100%!important;height:100%!important;display:block;border-radius:4p
   <button class="bottom" title="Settings">⚙</button>
 </nav>
 
-main class="workspace">
+<main class="workspace">
   <div class="chartbar">
     <div class="instrument">XAUUSD <span>· OANDA · LIVE STREAM</span></div>
     <div class="tabs" id="timeframes">
@@ -326,7 +326,7 @@ main class="workspace">
   </section>
 </main>
 
-aside class="side">
+<aside class="side">
   <div class="side-tabs">
     <button class="active" onclick="switchSideTab(this)">ORDER</button>
     <button onclick="switchSideTab(this)">DEPTH</button>
@@ -480,12 +480,12 @@ function seed(){let p=4990;for(let i=0;i78;i++){let o=p,c=o+(Math.random()-.42)*
 function draw(){let r=canvas.getBoundingClientRect(),d=devicePixelRatio||1;canvas.width=r.width*d;canvas.height=r.height*d;ctx.scale(d,d);let w=r.width,h=r.height;ctx.clearRect(0,0,w,h);ctx.strokeStyle='#171c26';ctx.lineWidth=1;for(let i=0;i8;i++){let y=i*h/8;ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke()}for(let i=0;i10;i++){let x=i*w/10;ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,h);ctx.stroke()}let vals=candles.flatMap(x=>[x.h,x.l]),min=Math.min(...vals)-4,max=Math.max(...vals)+4,sx=w/candles.length,py=v=>h-28-(v-min)/(max-min)*(h-55);let ema=[],e=candles[0].c,k=2/20;candles.forEach(x=>{e=x.c*k+e*(1-k);ema.push(e)});candles.forEach((c,i)=>{let x=i*sx+sx/2,up=c.c>=c.o,col=up?'#16c784':'#ea3943';ctx.strokeStyle=col;ctx.beginPath();ctx.moveTo(x,py(c.h));ctx.lineTo(x,py(c.l));ctx.stroke();ctx.fillStyle=col;let y=Math.min(py(c.o),py(c.c)),bh=Math.max(1,Math.abs(py(c.c)-py(c.o)));ctx.fillRect(x-Math.max(2,sx*.28),y,Math.max(3,sx*.56),bh)});ctx.strokeStyle='#7a95ff';ctx.lineWidth=1.4;ctx.beginPath();ema.forEach((v,i)=>{let x=i*sx+sx/2;i?ctx.lineTo(x,py(v)):ctx.moveTo(x,py(v))});ctx.stroke()}
 const fmtPx=v=>{v=Number(v);return Number.isFinite(v)&&v>0?v.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):'—'};
 function emaNow(){if(!candles.length)return 0;let e=candles[0].c,k=2/145;for(const x of candles)e=x.c*k+e*(1-k);return e}
-function updateLegend(){if(!candles.length)return;const last=candles[candles.length-1];document.getElementById('chartLegend').innerHTML=`b>O <span class="o">${fmtPx(last.o)}</span></b> <b>H ${fmtPx(last.h)}</b> <b>L ${fmtPx(last.l)}</b> <b>C ${fmtPx(last.c)}</b> <b class="e">EMA 144 · ${fmtPx(emaNow())}</b>`}
+function updateLegend(){if(!candles.length)return;const last=candles[candles.length-1];document.getElementById('chartLegend').innerHTML=`<b>O <span class="o">${fmtPx(last.o)}</span></b> <b>H ${fmtPx(last.h)}</b> <b>L ${fmtPx(last.l)}</b> <b>C ${fmtPx(last.c)}</b> <b class="e">EMA 144 · ${fmtPx(emaNow())}</b>`}
 async function loadCandles(tf){currentTF=tf||currentTF;document.querySelectorAll('#timeframes button').forEach(b=>b.classList.remove('active'));document.querySelectorAll('#timeframes button').forEach(b=>{if(b.textContent===tf)b.classList.add('active')});if(location.protocol==='file:'){seed();draw();updateLegend();return}candles=[];try{const d=await(await fetch(`/api/candles?interval=${currentTF}&outputsize=300`)).json();if(d.values&&d.values.length)candles=d.values.map(v=>({o:v.open,h:v.high,l:v.low,c:v.close}))}catch(e){}if(!candles.length)seed();draw();updateLegend()}
 window.addEventListener('resize',draw);
 
 /* Enhanced depth visualization */
-function renderDepth(){const depth=document.getElementById('depth');if(!depth)return;depth.innerHTML='';for(let i=0;i8;i++){const bid=i>3;const price=(5024.72-i*.18).toFixed(2);const vol=(.2+Math.random()*3).toFixed(2);const row=document.createElement('div');row.className='depthrow';row.innerHTML=`span class="dep-vol">${bid?vol:''}</span><span class="${bid?'dep-bid':'dep-ask'}">${price}</span><span class="dep-vol">${bid?'':vol}</span><div class="dep-visual"><span class="dep-fill ${bid?'bid':'ask'}" style="width:${20+Math.random()*70}%"></span></div>`;depth.appendChild(row)}}
+function renderDepth(){const depth=document.getElementById('depth');if(!depth)return;depth.innerHTML='';for(let i=0;i8;i++){const bid=i>3;const price=(5024.72-i*.18).toFixed(2);const vol=(.2+Math.random()*3).toFixed(2);const row=document.createElement('div');row.className='depthrow';row.innerHTML=`<span class="dep-vol">${bid?vol:''}</span><span class="${bid?'dep-bid':'dep-ask'}">${price}</span><span class="dep-vol">${bid?'':vol}</span><div class="dep-visual"><span class="dep-fill ${bid?'bid':'ask'}" style="width:${20+Math.random()*70}%"></span></div>`;depth.appendChild(row)}}
 
 /* Economic Calendar mock */
 function renderCalendar(){const cal=document.getElementById('calendarBody');if(!cal)return;const events=[
@@ -494,7 +494,7 @@ function renderCalendar(){const cal=document.getElementById('calendarBody');if(!
   {time:'14:00',label:'Fed Chair Speech',impact:'high'},
   {time:'15:30',label:'Crude Oil Inventories',impact:'med'},
   {time:'16:45',label:'US Manufacturing PMI',impact:'med'},
-];cal.innerHTML=events.map(e=>`div class="cal-row"><span class="cal-time">${e.time}</span><span class="cal-label">${e.label}</span><span class="cal-impact ${e.impact}">${e.impact.toUpperCase()}</span></div>`).join('')}
+];cal.innerHTML=events.map(e=>`<div class="cal-row"><span class="cal-time">${e.time}</span><span class="cal-label">${e.label}</span><span class="cal-impact ${e.impact}">${e.impact.toUpperCase()}</span></div>`).join('')}
 
 /* Dock switching */
 function switchDock(key){document.querySelectorAll('#docktabs button').forEach(b=>b.classList.remove('active'));document.querySelectorAll('#docktabs button').forEach(b=>{if(b.textContent.toLowerCase().includes(key))b.classList.add('active')});
@@ -518,7 +518,7 @@ function setOrderType(type,btn){document.querySelectorAll('.seg button').forEach
 /* Orders */
 let lots=.2;
 function adjustLots(delta){lots=Math.max(.1,Math.min(5,lots+delta));document.getElementById('lots').textContent=lots.toFixed(2);}
-function submitOrder(side){toast(`Demo ${side.toUpperCase()} ${lots.toFixed(2)} XAUUSD — start server for execution.`);}
+function submitOrder(side){const id='auric-'+Date.now()+'-'+Math.random().toString(16).slice(2,8);fetch('/api/orders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({side,lots,mode:tradeMode,client_order_id:id})}).then(async r=>{const b=await r.json().catch(()=>({}));if(!r.ok)throw new Error(b.detail||r.statusText);toast(`PAPER ${side.toUpperCase()} ${lots.toFixed(2)} XAUUSD @ ${b.fillPrice}`)}).catch(e=>toast('Order rejected: '+e.message));}
 function toast(t){const e=document.getElementById('toast');e.textContent=t;e.classList.add('show');setTimeout(()=>e.classList.remove('show'),2200);}
 
 /* Strategy catalog */
@@ -529,7 +529,7 @@ strategyCatalog.forEach((s,i)=>{let c=document.createElement('div');c.className=
 function showModule(id){document.querySelectorAll('.module').forEach(x=>x.classList.remove('open'));document.getElementById(id).classList.add('open')}
 
 /* Backtest */
-function runBacktestClick(){document.getElementById('btStatus').textContent='Running event-driven simulation…';setTimeout(()=>document.getElementById('btStatus').textContent='Preview complete · 48 trades · sample data',2000);}
+async function runBacktestClick(){const st=document.getElementById('btStatus');st.textContent='Running event-driven simulation…';try{const d=await(await fetch('/api/candles?interval=M15&outputsize=500')).json();if(!d.values||d.values.length<220)throw new Error('need 220+ candles, got '+(d.values?d.values.length:0));const payload={candles:d.values,strategy:document.getElementById('btStrategy').value||'ema144_pullback',params:{},initial:Number(document.getElementById('btCapital').value)||10000,risk_pct:Number(document.getElementById('btRisk').value)||1,sizer:document.getElementById('btSizer').value||'fixed_fractional',spread:.18};const r=await(await fetch('/api/backtest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).json();if(!r.metrics)throw new Error(r.detail||'backtest failed');const m=r.metrics;const cards=document.querySelectorAll('#btMetrics .metriccard b');const vals=[m.net_pnl,m.max_drawdown_pct+'%',m.win_rate+'%',m.profit_factor,m.sharpe,m.trades];cards.forEach((b,i)=>b.textContent=vals[i]);const curve=r.equity_curve||[];if(curve.length>1){const mn=Math.min(...curve),mx=Math.max(...curve),rg=mx-mn||1;const step=Math.max(1,Math.floor(curve.length/240));const pts=curve.filter((_,i)=>i%step===0).map((v,i,a)=>`${(i/(a.length-1))*900},${168-((v-mn)/rg)*130}`).join(' L');const dAttr=`M ${pts}`;document.getElementById('equityLine').setAttribute('d',dAttr);document.getElementById('equityFill').setAttribute('d',`${dAttr} L 900,200 L 0,200 Z`)}st.textContent=`Complete · ${m.trades} trades · ${d.source} data`}catch(e){st.textContent='Backtest failed — '+e.message}}
 
 /* Engine / market data */
 let socket,retry=1000,demoTimer,lastTick=0,tradeMode='paper',liveAllowed=false;

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { TopBar } from './components/TopBar'
 import { Rail } from './components/Rail'
 import { ChartPanel } from './components/ChartPanel'
@@ -12,6 +13,7 @@ import { AlertsModal } from './components/AlertsModal'
 import { KronosModal } from './components/KronosModal'
 import { openModal } from './components/Modal'
 import { useMarketFeed } from './lib/useMarketFeed'
+import { api } from './lib/api'
 import type { Quote } from './lib/types'
 
 export type ViewKey = 'chart' | 'strategies' | 'backtest' | 'positions' | 'risk' | 'journal' | 'alerts' | 'kronos'
@@ -26,21 +28,30 @@ export default function App() {
       return 'XAUUSD'
     }
   })
-  const { tick, status } = useMarketFeed()
-  const allTicks = tick ?? null
+  const { ticks, status } = useMarketFeed()
+
+  // REST seed for the active symbol (covers WS gaps + first paint).
+  const { data: symbolSeed } = useQuery({
+    queryKey: ['symbol-quote', activeSymbol],
+    queryFn: () => api.symbolQuote(activeSymbol),
+    refetchInterval: 5000,
+    staleTime: 2000,
+    retry: false,
+  })
 
   const quote: Quote = useMemo(() => {
-    if (allTicks && allTicks.symbol === activeSymbol) return allTicks
+    const live = ticks[activeSymbol] ?? symbolSeed ?? undefined
+    if (live && live.price > 0) return live
     return {
       symbol: activeSymbol,
       bid: 5024.36,
       ask: 5024.54,
       price: 5024.36,
       spread: 0.18,
-      source: status === 'connecting' ? 'Connecting' : 'MT5',
+      source: status === 'connecting' ? 'Connecting' : 'Demo',
       timestamp: Date.now(),
     }
-  }, [allTicks, activeSymbol, status])
+  }, [ticks, symbolSeed, activeSymbol, status])
 
   useEffect(() => {
     try {
@@ -81,7 +92,7 @@ export default function App() {
 
         <aside className="flex min-h-0 flex-col overflow-hidden bg-ink-900">
           <div className="shrink-0 border-b border-ink-700">
-            <OrderTicket quote={quote} live={live} />
+            <OrderTicket quote={quote} live={live} activeSymbol={activeSymbol} />
           </div>
           <div className="min-h-0 flex-1 overflow-auto">
             <DepthPanel quote={quote} />

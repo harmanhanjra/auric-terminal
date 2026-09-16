@@ -1,13 +1,15 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   createChart,
   ColorType,
   CandlestickSeries,
+  BarSeries,
   LineSeries,
   HistogramSeries,
   type IChartApi,
   type ISeriesApi,
+  type UTCTimestamp,
 } from 'lightweight-charts'
 import { clsx } from 'clsx'
 import { Layers, Bell, Settings2, Grid3X3, Zap, Activity, HeartPulse, TrendingUp } from 'lucide-react'
@@ -32,23 +34,96 @@ const PERIODS = [
   { id: 'ALL', label: 'ALL' },
 ]
 
+const PERIOD_FRACTION: Record<string, number> = {
+  '1D': 0.15,
+  '1W': 0.35,
+  '1M': 0.6,
+  '3M': 0.8,
+  YTD: 0.9,
+  '1Y': 1,
+  ALL: 1,
+}
+
+function toTime(c: Candle): UTCTimestamp {
+  return Math.floor((c.time ?? 0) / 1000) as UTCTimestamp
+}
+
+function toHeikinAshi(candles: Candle[]): Candle[] {
+  let prevOpen = candles[0]?.open ?? 0
+  let prevClose = candles[0]?.close ?? 0
+  return candles.map((c) => {
+    const haClose = (c.open + c.high + c.low + c.close) / 4
+    const haOpen = (prevOpen + prevClose) / 2
+    const haHigh = Math.max(c.high, haOpen, haClose)
+    const haLow = Math.min(c.low, haOpen, haClose)
+    prevOpen = haOpen
+    prevClose = haClose
+    return { ...c, open: haOpen, high: haHigh, low: haLow, close: haClose }
+  })
+}
+
+function calcSMA(values: number[], period: number): (number | null)[] {
+  return values.map((_, i) => {
+    if (i < period - 1) return null
+    let s = 0
+    for (let j = i - period + 1; j <= i; j++) s += values[j]
+    return s / period
+  })
+}
+
+function calcBollinger(candles: Candle[], period = 20, mult = 2) {
+  const closes = candles.map((c) => c.close)
+  const sma = calcSMA(closes, period)
+  return {
+    upper: candles.map((c, i) => {
+      if (sma[i] == null) return null
+      const slice = closes.slice(i - period + 1, i + 1)
+      const mean = sma[i] as number
+      const sd = Math.sqrt(slice.reduce((a, v) => a + (v - mean) ** 2, 0) / period)
+      return { time: toTime(c), value: mean + mult * sd }
+    }).filter((p) => p && p.value != null),
+    lower: candles.map((c, i) => {
+      if (sma[i] == null) return null
+      const slice = closes.slice(i - period + 1, i + 1)
+      const mean = sma[i] as number
+      const sd = Math.sqrt(slice.reduce((a, v) => a + (v - mean) ** 2, 0) / period)
+      return { time: toTime(c), value: mean - mult * sd }
+    }).filter((p) => p && p.value != null),
+  }
+}
+
+function calcVWAP(candles: Candle[]) {
+  let cumPV = 0
+  let cumV = 0
+  return candles.map((c) => {
+    const vol = c.volume ?? 1
+    const typical = (c.high + c.low + c.close) / 3
+    cumPV += typical * vol
+    cumV += vol
+    return { time: toTime(c), value: cumV > 0 ? cumPV / cumV : c.close }
+  })
+}
+
 interface ChartPanelProps {
   quote?: Quote
   activeSymbol?: string
   onSelectSymbol?: (symbol: string) => void
 }
 
-export function ChartPanel({ quote: _quote, activeSymbol = 'XAUUSD', onSelectSymbol }: ChartPanelProps) {
+export function ChartPanel({ quote, activeSymbol = 'XAUUSD', onSelectSymbol }: ChartPanelProps) {
   const [tf, setTf] = useState('M15')
   const [period, setPeriod] = useState('1M')
-  const [indicators] = useState<string[]>(['ema20'])
+  const [indicators, setIndicators] = useState<string[]>(['ema20'])
   const [chartType, setChartType] = useState<'Candlestick' | 'Line' | 'Bar' | 'HeikinAshi'>('Candlestick')
   const [showDrawingTools, setShowDrawingTools] = useState(false)
-  const [symbols, setSymbols] = useState<string[]>([activeSymbol])
+  // Tracked-symbol switcher (mirrors the 3-symbol backend scope).
+  const symbols = ['XAUUSD', 'BTCUSD', 'EURUSD']
+  const [showStudiesModal, setShowStudiesModal] = useState(false)
 
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
+  const barSeriesRef = useRef<ISeriesApi<'Bar'> | null>(null)
   const lineSeriesRef = useRef<ISeriesApi<'Line'> | null>(null)
   const histogramSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
 
@@ -56,11 +131,31 @@ export function ChartPanel({ quote: _quote, activeSymbol = 'XAUUSD', onSelectSym
 
   const { data, isLoading } = useQuery({
     queryKey: ['candles', tf, activeSymbol],
-    queryFn: () => api.candles(tf, 300, activeSymbol),
+    queryFn: () => api.candles(tf, 500, activeSymbol),
     staleTime: 30_000,
   })
 
-  const candles: Candle[] = data?.values ?? []
+  const candles: Candle[] = useMemo(() => {
+    let rows = data?.values ?? []
+    // Live tick projects onto the forming bar so the chart breathes.
+    if (quote && quote.price > 0 && rows.length) {
+      const last = rows[rows.length - 1]
+      rows = [
+        ...rows.slice(0, -1),
+        {
+          ...last,
+          close: quote.price,
+          high: Math.max(last.high, quote.price),
+          low: Math.min(last.low, quote.price),
+        },
+      ]
+    }
+    const frac = PERIOD_FRACTION[period] ?? 1
+    if (frac < 1 && rows.length > 20) {
+      rows = rows.slice(Math.floor(rows.length * (1 - frac)))
+    }
+    return rows
+  }, [data, quote, period])
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -94,20 +189,27 @@ export function ChartPanel({ quote: _quote, activeSymbol = 'XAUUSD', onSelectSym
     })
 
     // Create main series based on chart type
-    let mainSeries: ISeriesApi<'Candlestick'> | ISeriesApi<'Line'>
-
     switch (chartType) {
       case 'Line':
-        mainSeries = chart.addSeries(LineSeries, {
+        lineSeriesRef.current = chart.addSeries(LineSeries, {
           color: '#7a95ff',
           lineWidth: 2,
           priceLineVisible: false,
           lastValueVisible: false,
         })
-        lineSeriesRef.current = mainSeries
+        candleSeriesRef.current = null
+        barSeriesRef.current = null
+        break
+      case 'Bar':
+        barSeriesRef.current = chart.addSeries(BarSeries, {
+          upColor: '#16c784',
+          downColor: '#ea3943',
+        })
+        candleSeriesRef.current = null
+        lineSeriesRef.current = null
         break
       default:
-        mainSeries = chart.addSeries(CandlestickSeries, {
+        candleSeriesRef.current = chart.addSeries(CandlestickSeries, {
           upColor: '#16c784',
           downColor: '#ea3943',
           borderUpColor: '#16c784',
@@ -115,7 +217,8 @@ export function ChartPanel({ quote: _quote, activeSymbol = 'XAUUSD', onSelectSym
           wickUpColor: '#16c784',
           wickDownColor: '#ea3943',
         })
-        candleSeriesRef.current = mainSeries as ISeriesApi<'Candlestick'>
+        lineSeriesRef.current = null
+        barSeriesRef.current = null
         break
     }
 
@@ -145,31 +248,40 @@ export function ChartPanel({ quote: _quote, activeSymbol = 'XAUUSD', onSelectSym
   useEffect(() => {
     if (!candles.length || !chartRef.current) return
 
+    const rows = chartType === 'HeikinAshi' ? toHeikinAshi(candles) : candles
+
     // Update main series
     if (chartType === 'Line' && lineSeriesRef.current) {
-      const seriesData = candles.map((c) => ({
-        time: ((c.time ?? 0) / 1000) as unknown as string,
-        value: c.close,
-      }))
-      lineSeriesRef.current.setData(seriesData)
-    } else if (chartType !== 'Line' && candleSeriesRef.current) {
-      const seriesData = candles.map((c) => ({
-        time: ((c.time ?? 0) / 1000) as unknown as string,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-      }))
-      candleSeriesRef.current.setData(seriesData)
+      lineSeriesRef.current.setData(
+        rows.map((c) => ({ time: toTime(c), value: c.close })),
+      )
+    } else if (chartType === 'Bar' && barSeriesRef.current) {
+      barSeriesRef.current.setData(
+        rows.map((c) => ({
+          time: toTime(c),
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+        })),
+      )
+    } else if (candleSeriesRef.current) {
+      candleSeriesRef.current.setData(
+        rows.map((c) => ({
+          time: toTime(c),
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+        })),
+      )
     }
 
     // Update volume series
     if (histogramSeriesRef.current) {
-      const volumeData = candles.map((c) => ({
-        time: ((c.time ?? 0) / 1000) as unknown as string,
-        value: c.volume,
-      }))
-      histogramSeriesRef.current.setData(volumeData)
+      histogramSeriesRef.current.setData(
+        rows.map((c) => ({ time: toTime(c), value: c.volume ?? 0 })),
+      )
     }
 
     // Update indicator series
@@ -208,30 +320,63 @@ export function ChartPanel({ quote: _quote, activeSymbol = 'XAUUSD', onSelectSym
       }
 
       if (series) {
-        let data: { time: string; value: number }[] = []
-
         switch (id) {
           case 'ema20':
-            data = calculateEMA(candles, 20)
+            series.setData(calculateEMA(candles, 20))
             break
           case 'ema50':
-            data = calculateEMA(candles, 50)
+            series.setData(calculateEMA(candles, 50))
             break
-          // Add more indicator calculations as needed
+          case 'vwap':
+            series.setData(calcVWAP(candles))
+            break
+          case 'bbands': {
+            const bb = calcBollinger(candles)
+            series.setData(bb.upper as { time: UTCTimestamp; value: number }[])
+            // Second band needs its own series; reuse color with new line.
+            let lower = indicatorSeriesRefs.current.get('bbands-lower')
+            if (!lower) {
+              lower = chartRef.current?.addSeries(LineSeries, {
+                color: indicator.color,
+                lineWidth: 1,
+                lineStyle: 2,
+                priceLineVisible: false,
+                lastValueVisible: false,
+              })
+              if (lower) indicatorSeriesRefs.current.set('bbands-lower', lower)
+            }
+            lower?.setData(bb.lower as { time: UTCTimestamp; value: number }[])
+            break
+          }
+          case 'ichimoku': {
+            // Tenkan-sen (9) approximation as the Ichimoku signal line.
+            const highs = candles.map((c) => c.high)
+            const lows = candles.map((c) => c.low)
+            const pts: { time: UTCTimestamp; value: number }[] = []
+            for (let i = 8; i < candles.length; i++) {
+              const h = Math.max(...highs.slice(i - 8, i + 1))
+              const l = Math.min(...lows.slice(i - 8, i + 1))
+              pts.push({ time: toTime(candles[i]), value: (h + l) / 2 })
+            }
+            series.setData(pts)
+            break
+          }
           default:
-            // For now, just use close price as placeholder
-            data = candles.map(c => ({
-              time: ((c.time ?? 0) / 1000) as unknown as string,
-              value: c.close,
-            }))
+            series.setData(candles.map((c) => ({ time: toTime(c), value: c.close })))
         }
-
-        series.setData(data)
       }
     })
+    // bbands-lower is managed alongside bbands; drop it when bbands is off.
+    if (!indicators.includes('bbands')) {
+      const lower = indicatorSeriesRefs.current.get('bbands-lower')
+      if (lower) {
+        chartRef.current?.removeSeries(lower)
+        indicatorSeriesRefs.current.delete('bbands-lower')
+      }
+    }
   }
 
-  const calculateEMA = (candles: Candle[], period: number): { time: string; value: number }[] => {
+  const calculateEMA = (candles: Candle[], period: number): { time: UTCTimestamp; value: number }[] => {
     if (candles.length === 0) return []
 
     const closes = candles.map(c => c.close)
@@ -245,9 +390,9 @@ export function ChartPanel({ quote: _quote, activeSymbol = 'XAUUSD', onSelectSym
     }
 
     return candles.map((c, i) => ({
-      time: ((c.time ?? 0) / 1000) as unknown as string,
+      time: toTime(c),
       value: emaValues[i],
-    })).filter(v => v.value !== null) as { time: string; value: number }[]
+    }))
   }
 
   const last = candles[candles.length - 1]
@@ -320,28 +465,17 @@ export function ChartPanel({ quote: _quote, activeSymbol = 'XAUUSD', onSelectSym
           </div>
 
           {/* Indicators Button */}
-          <button
-            onClick={() => setShowDrawingTools(!showDrawingTools)}
-            className={clsx(
-              'flex items-center gap-1 rounded px-2 py-1 text-[10px] font-medium text-fg-400 hover:bg-ink-800 hover:text-fg-200',
-              showDrawingTools ? 'bg-gold-600/20' : ''
-            )}
-          >
-            <Zap className="h-3.5 w-3.5" /> Studies
-          </button>
-
-          {/* Symbol Comparison */}
           <div className="relative">
             <button
-              onClick={() => {
-                // In a real implementation, this would open a symbol search dialog
-                setSymbols(['XAUUSD', 'XAGUSD', 'USOIL']) // Demo
-              }}
+              onClick={() => setShowStudiesModal(!showStudiesModal)}
               className={clsx(
-                'flex items-center gap-1 rounded px-2 py-1 text-[10px] font-medium text-fg-400 hover:bg-ink-800 hover:text-fg-200'
+                'flex items-center gap-1 rounded px-2 py-1 text-[10px] font-medium transition-colors',
+                showStudiesModal || indicators.length > 0
+                  ? 'bg-gold-600/20 text-gold-300 ring-1 ring-gold-600/30'
+                  : 'text-fg-400 hover:bg-ink-800 hover:text-fg-200'
               )}
             >
-              <Activity className="h-3.5 w-3.5" /> Compare
+              <Zap className="h-3.5 w-3.5" /> Studies ({indicators.length})
             </button>
             {symbols.length > 1 && (
               <div className="absolute left-0 top-full mt-1 w-48 bg-ink-800/90 border border-ink-700 rounded-md p-2 z-20">
@@ -360,6 +494,36 @@ export function ChartPanel({ quote: _quote, activeSymbol = 'XAUUSD', onSelectSym
                     )}
                   </div>
                 ))}
+            {showStudiesModal && (
+              <div className="absolute left-0 top-full mt-1.5 w-52 rounded-lg border border-ink-700 bg-ink-900/95 p-2 shadow-2xl backdrop-blur-md z-30 space-y-1">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-fg-400 px-1 pb-1 border-b border-ink-800">
+                  Technical Overlays
+                </div>
+                {INDICATORS.map((ind) => {
+                  const active = indicators.includes(ind.id)
+                  return (
+                    <button
+                      key={ind.id}
+                      onClick={() => {
+                        setIndicators((prev) =>
+                          active ? prev.filter((id) => id !== ind.id) : [...prev, ind.id]
+                        )
+                      }}
+                      className={clsx(
+                        'flex w-full items-center justify-between rounded px-2 py-1 text-[11px] transition-colors',
+                        active ? 'bg-gold-600/15 text-gold-300' : 'text-fg-300 hover:bg-ink-800 hover:text-fg-100'
+                      )}
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="h-2 w-2 rounded-full" style={{ backgroundColor: ind.color }} />
+                        <span>{ind.name}</span>
+                      </div>
+                      <span className="text-[10px] font-bold">{active ? '✓' : '+'}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            )}
               </div>
             )}
           </div>
@@ -368,7 +532,10 @@ export function ChartPanel({ quote: _quote, activeSymbol = 'XAUUSD', onSelectSym
           <button
             onClick={() => setShowDrawingTools(!showDrawingTools)}
             className={clsx(
-              'flex items-center gap-1 rounded px-2 py-1 text-[10px] font-medium text-fg-400 hover:bg-ink-800 hover:text-fg-200'
+              'flex items-center gap-1 rounded px-2 py-1 text-[10px] font-medium transition-colors',
+              showDrawingTools
+                ? 'bg-gold-600/20 text-gold-300 ring-1 ring-gold-600/30'
+                : 'text-fg-400 hover:bg-ink-800 hover:text-fg-200'
             )}
           >
             <HeartPulse className="h-3.5 w-3.5" /> Drawing
@@ -438,7 +605,7 @@ export function ChartPanel({ quote: _quote, activeSymbol = 'XAUUSD', onSelectSym
           <div className="flex h-full items-center gap-2 px-2 pt-1">
             <span className="text-[9px] font-medium text-fg-500">Volume</span>
             <div className="flex-1 h-[6px] bg-ink-800/50 rounded overflow-hidden">
-              <div className="h-full w-[60%] bg-26a69a" />
+              <div className="h-full w-[60%] bg-[#26a69a]" />
             </div>
             <span className="tnum text-[9px] text-fg-500">1.25M</span>
           </div>

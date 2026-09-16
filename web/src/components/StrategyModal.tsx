@@ -19,7 +19,7 @@ export function StrategyModal() {
     staleTime: 60_000,
   })
   const [active, setActive] = useState<string>('')
-  const preview = data?.strategies?.slice(0, 9) ?? []
+  const list = data?.strategies?.length ? data.strategies : FALLBACK
 
   return (
     <Modal
@@ -29,7 +29,7 @@ export function StrategyModal() {
       badges={['Live signals', 'JSON export', 'Versioned']}
     >
       <div className="grid grid-cols-1 gap-2 p-4 sm:grid-cols-2 lg:grid-cols-3">
-        {(preview.length ? preview : FALLBACK).map((s, i) => {
+        {list.map((s, i) => {
           const cat = CATEGORY_META[s.category] ?? s.category
           const selected = active === s.id
           return (
@@ -62,10 +62,20 @@ const FALLBACK = [
   { id: 'ema144_pullback', name: 'EMA 144 + 9/21 Pullback', category: 'trend' },
   { id: 'triple_ema', name: 'Triple EMA 20/50/200', category: 'trend' },
   { id: 'supertrend_adx', name: 'SuperTrend + ADX', category: 'trend' },
+  { id: 'ichimoku', name: 'Ichimoku Kumo Breakout', category: 'trend' },
+  { id: 'donchian', name: 'Donchian Turtle Breakout', category: 'trend' },
   { id: 'bb_rsi', name: 'Bollinger Fade + RSI', category: 'mean_reversion' },
   { id: 'vwap_reversion', name: 'VWAP Deviation Reversion', category: 'mean_reversion' },
+  { id: 'keltner_squeeze', name: 'Keltner Squeeze Release', category: 'mean_reversion' },
+  { id: 'rsi2', name: 'RSI(2) Extremes', category: 'mean_reversion' },
   { id: 'fib_retracement', name: 'Fibonacci Retracement', category: 'structure' },
+  { id: 'fib_extension', name: 'Fibonacci Extension', category: 'structure' },
+  { id: 'bos_choch', name: 'BOS + CHoCH', category: 'structure' },
+  { id: 'orderblock_fvg', name: 'Order Block + FVG', category: 'structure' },
+  { id: 'liquidity_sweep', name: 'Liquidity Sweep', category: 'structure' },
+  { id: 'sr_bounce', name: 'Support/Resistance Bounce', category: 'structure' },
   { id: 'asia_breakout', name: 'Asian Range Breakout', category: 'session' },
+  { id: 'ny_orb', name: 'New York Opening Range', category: 'session' },
   { id: 'atr_expansion', name: 'ATR Expansion Breakout', category: 'breakout' },
   { id: 'momentum_breadth_vol', name: 'Momentum + Breadth + Volatility', category: 'trend' },
 ] as const

@@ -1,0 +1,39 @@
+{
+  "name": "auric-terminal-desktop",
+  "version": "0.2.0",
+  "private": true,
+  "description": "AuricTerminal desktop shell (Electron) — spawns the local FastAPI gateway and shows the built web UI.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis",
+    "dist:win": "electron-builder --win nsis",
+    "dist:linux": "electron-builder --linux AppImage"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.auric.terminal",
+    "productName": "AuricTerminal",
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../web/dist",
+        "to": "web-dist",
+        "filter": ["**/*"]
+      }
+    ],
+    "win": {
+      "target": ["nsis"]
+    },
+    "linux": {
+      "target": ["AppImage"]
+    }
+  }
+}

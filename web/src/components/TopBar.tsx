@@ -1,5 +1,5 @@
 import { clsx } from 'clsx'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Power, Save, Loader, RotateCcw } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
@@ -34,11 +34,32 @@ function getCurrentSession(): string {
 }
 
 export function TopBar({ quote, live, onToggleLive, feedStatus, activeSymbol, onSelectSymbol }: TopBarProps) {
+  const queryClient = useQueryClient()
   const { data: account } = useQuery({
     queryKey: ['account'],
     queryFn: api.account,
     refetchInterval: 10_000,
   })
+
+  const toggleLiveMutation = useMutation({
+    mutationFn: async (enable: boolean) => {
+      if (enable) {
+        await api.engineStart()
+      } else {
+        await api.engineStop()
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['engine'] })
+      queryClient.invalidateQueries({ queryKey: ['symbols'] })
+    },
+  })
+
+  const handleToggleLive = () => {
+    const newLive = !live
+    onToggleLive(newLive)
+    toggleLiveMutation.mutate(newLive)
+  }
 
   const session = getCurrentSession()
   const priceFlash = usePriceFlash(quote.price)
@@ -79,23 +100,17 @@ export function TopBar({ quote, live, onToggleLive, feedStatus, activeSymbol, on
           {session}
         </span>
         <button
-          onClick={() => onToggleLive(!live)}
+          onClick={handleToggleLive}
+          disabled={toggleLiveMutation.isPending}
           className={clsx('rounded-md border px-2.5 py-1 text-[10px] font-bold tracking-[0.08em] transition-colors', live ? 'border-bear-500/40 bg-bear-500/10 text-bear-500' : 'border-gold-600/40 bg-gold-600/10 text-gold-300')}
         >
-          {live ? 'LIVE' : 'PAPER'}
+          {toggleLiveMutation.isPending ? '...' : live ? 'LIVE' : 'PAPER'}
         </button>
       </div>
 
-      {/* Ticker — pure CSS marquee for reliability */}
+      {/* Ticker — live quotes for tracked symbols, pure CSS marquee */}
       <div className="hidden flex-1 overflow-hidden lg:block">
-        <div className="animate-[marquee_30s_linear_infinite] flex items-center gap-6 whitespace-nowrap text-[10px]">
-          <TickerItem sym="XAUUSD" price={quote.price} />
-          <TickerItem sym="XAGUSD" price={28.45} />
-          <TickerItem sym="EURUSD" price={1.0875} />
-          <TickerItem sym="GBPUSD" price={1.2654} />
-          <TickerItem sym="USDJPY" price={149.85} />
-          <TickerItem sym="USOIL" price={78.23} />
-        </div>
+        <TickerTape activeSymbol={activeSymbol} activePrice={quote.price} />
       </div>
 
       {/* Account */}
@@ -138,6 +153,40 @@ function IconBtn({ children, label }: { children: React.ReactNode; label: string
     <button title={label} aria-label={label} className="grid h-7 w-7 place-items-center rounded-md text-fg-500 hover:bg-ink-800 hover:text-fg-200">
       {children}
     </button>
+  )
+}
+
+function TickerTape({ activeSymbol, activePrice }: { activeSymbol: string; activePrice: number }) {
+  const { data } = useQuery({
+    queryKey: ['ticker-quotes'],
+    queryFn: async () => {
+      const syms = ['XAUUSD', 'BTCUSD', 'EURUSD']
+      const out: { sym: string; price: number }[] = []
+      for (const s of syms) {
+        if (s === activeSymbol) {
+          out.push({ sym: s, price: activePrice })
+          continue
+        }
+        try {
+          const q = await api.symbolQuote(s)
+          if (q && q.price > 0) out.push({ sym: s, price: q.price })
+        } catch {
+          /* skip — tape shows the rest */
+        }
+      }
+      return out
+    },
+    refetchInterval: 15_000,
+    staleTime: 10_000,
+    retry: false,
+  })
+  const items = data?.length ? data : [{ sym: activeSymbol, price: activePrice }]
+  return (
+    <div className="animate-[marquee_30s_linear_infinite] flex items-center gap-6 whitespace-nowrap text-[10px]">
+      {items.map((t) => (
+        <TickerItem key={t.sym} sym={t.sym} price={t.price} />
+      ))}
+    </div>
   )
 }
 

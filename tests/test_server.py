@@ -215,9 +215,14 @@ def test_account_unavailable(client):
     assert r.json()["connected"] is False
 
 
-def test_candles_unavailable_without_source(client):
+def test_candles_always_available(client):
+    # MT5 offline + no Yahoo creds -> deterministic Demo series (honestly labelled)
     r = client.get("/api/candles?interval=M15")
-    assert r.status_code in (502, 503)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["source"] == "Demo"
+    assert len(body["values"]) >= 10
+    assert all({"open", "high", "low", "close"} <= set(v) for v in body["values"])
 
 
 def test_journal(client):

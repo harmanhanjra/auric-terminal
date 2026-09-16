@@ -1,4 +1,7 @@
+import os
 from dotenv import load_dotenv
 load_dotenv()
 import uvicorn
-uvicorn.run('server:app', host='127.0.0.1', port=8000, log_level='info')
+# PORT/AURIC_PORT let launchers and the Electron shell pick a free port.
+port = int(os.getenv("PORT", os.getenv("AURIC_PORT", "8000")))
+uvicorn.run('server:app', host='127.0.0.1', port=port, log_level='info')

@@ -80,11 +80,11 @@ export function BacktestModal() {
         ['Trades', '—', ''],
       ]
 
+  const candleCount = candlesData?.values?.length ?? 0
+  const canRun = candleCount >= 220
+
   const run = () => {
-    if (!candlesData?.values?.length) {
-      mutation.mutate()
-      return
-    }
+    if (!canRun) return
     mutation.mutate()
   }
 
@@ -140,12 +140,23 @@ export function BacktestModal() {
         </label>
         <button
           onClick={run}
-          disabled={mutation.isPending}
+          disabled={mutation.isPending || !canRun}
+          title={canRun ? 'Run backtest' : `Need 220+ candles (have ${candleCount})`}
           className="ml-auto h-9 rounded-md bg-bull-500 px-4 text-[11px] font-bold uppercase tracking-[0.08em] text-white transition-colors hover:bg-bull-400 disabled:opacity-50"
         >
           {mutation.isPending ? 'Running…' : 'Run Backtest'}
         </button>
       </div>
+      {mutation.isError && (
+        <div className="mx-4 mt-3 rounded-md border border-bear-500/30 bg-bear-500/10 px-3 py-2 text-[11px] text-bear-400">
+          Backtest failed: {mutation.error instanceof Error ? mutation.error.message : 'unknown error'}
+        </div>
+      )}
+      {!canRun && !mutation.isPending && (
+        <div className="mx-4 mt-3 rounded-md border border-gold-600/30 bg-gold-600/10 px-3 py-2 text-[11px] text-gold-300">
+          Waiting for candle history… ({candleCount}/220 bars loaded)
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-2 p-4 sm:grid-cols-3 lg:grid-cols-6">
         {metricCards.map(([label, value, tone]) => (

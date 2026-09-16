@@ -1,24 +1,37 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { clsx } from 'clsx'
 import { Minus, Plus, TrendingDown, TrendingUp } from 'lucide-react'
-import { api } from '../lib/api'
+import { api, getLiveKey, setLiveKey } from '../lib/api'
 import { fmtMoney, fmtPrice } from '../lib/format'
 import type { Quote } from '../lib/types'
 
 interface OrderTicketProps {
   quote: Quote
   live: boolean
+  activeSymbol?: string
 }
 
 const OZ_PER_LOT = 100
 
-export function OrderTicket({ quote, live }: OrderTicketProps) {
+export function OrderTicket({ quote, live, activeSymbol = 'XAUUSD' }: OrderTicketProps) {
   const [orderType, setOrderType] = useState<'market' | 'limit' | 'stop'>('market')
   const [lots, setLots] = useState(0.2)
   const [sl, setSl] = useState(4991.2)
   const [tp, setTp] = useState(5046)
   const [status, setStatus] = useState<{ kind: 'success' | 'error'; msg: string } | null>(null)
   const [pending, setPending] = useState(false)
+  const [liveKey, setLiveKeyState] = useState(() => getLiveKey())
+
+  // Re-anchor SL/TP around the live price whenever the symbol changes,
+  // so non-XAU symbols don't inherit gold's absolute levels.
+  useEffect(() => {
+    const p = quote.price
+    if (p > 0) {
+      setSl((v) => (Math.abs(v - p) / p > 0.2 ? Math.round(p * 0.996 * 100) / 100 : v))
+      setTp((v) => (Math.abs(v - p) / p > 0.2 ? Math.round(p * 1.004 * 100) / 100 : v))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSymbol])
 
   const riskPct = useMemo(
     () => (sl > 0 ? ((Math.abs(quote.price - sl) / quote.price) * 100).toFixed(2) : '—'),
@@ -51,6 +64,7 @@ export function OrderTicket({ quote, live }: OrderTicketProps) {
         stop_loss: orderType === 'market' ? sl : null,
         take_profit: orderType === 'market' ? tp : null,
         mode: live ? 'live' : 'paper',
+        symbol: activeSymbol,
         client_order_id: `auric-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
       })
       setStatus({
@@ -117,6 +131,25 @@ export function OrderTicket({ quote, live }: OrderTicketProps) {
         <span>Risk / Reward</span>
         <span className="tnum text-[13px] font-semibold text-gold-400">1 : {rr}</span>
       </div>
+
+      {live && (
+        <Field label="Live execution key · required for LIVE orders">
+          <div className="flex h-8 items-center gap-1 rounded-md border border-ink-700 bg-ink-800 px-2 focus-within:border-gold-600/50">
+            <input
+              type="password"
+              value={liveKey}
+              onChange={(e) => {
+                setLiveKeyState(e.target.value)
+                setLiveKey(e.target.value.trim())
+              }}
+              placeholder="X-Auric-Key from server .env"
+              autoComplete="off"
+              className="w-full bg-transparent text-right text-[12px] text-fg-100 outline-none placeholder:text-fg-600"
+              aria-label="Live execution key"
+            />
+          </div>
+        </Field>
+      )}
 
       <div className="grid grid-cols-2 gap-2">
         <button

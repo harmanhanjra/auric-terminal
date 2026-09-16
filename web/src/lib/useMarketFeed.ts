@@ -8,11 +8,13 @@ function wsUrl(): string {
 
 export interface UseMarketFeedResult {
   tick: Quote | null
+  ticks: Record<string, Quote>
   status: 'connecting' | 'open' | 'closed' | 'delayed' | 'live'
 }
 
 export function useMarketFeed(intervalMs = 4000): UseMarketFeedResult {
   const [tick, setTick] = useState<Quote | null>(null)
+  const [ticks, setTicks] = useState<Record<string, Quote>>({})
   const [status, setStatus] = useState<UseMarketFeedResult['status']>('connecting')
   const socketRef = useRef<WebSocket | null>(null)
   const retryRef = useRef(1000)
@@ -33,9 +35,11 @@ export function useMarketFeed(intervalMs = 4000): UseMarketFeedResult {
       socket.onmessage = (e) => {
         try {
           const m = JSON.parse(e.data)
-          if (m.type === 'tick') {
+          if (m.type === 'tick' && typeof m.symbol === 'string') {
             lastTickRef.current = Date.now()
-            setTick(m as Quote)
+            const q = m as Quote
+            setTick(q)
+            setTicks((prev) => (prev[q.symbol]?.timestamp === q.timestamp ? prev : { ...prev, [q.symbol]: q }))
             setStatus('live')
           }
         } catch {
@@ -70,7 +74,7 @@ export function useMarketFeed(intervalMs = 4000): UseMarketFeedResult {
     }
   }, [intervalMs])
 
-  return { tick, status }
+  return { tick, ticks, status }
 }
 
 export function usePollingQuery<T>(

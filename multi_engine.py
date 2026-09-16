@@ -28,27 +28,15 @@ def _local_confirmations(candles, ind=None):
 
 # ── Symbol registry ──────────────────────────────────────────────────────────
 SYMBOLS: List[str] = [
-    "XAUUSD", "BTCUSD",
-    "EURUSD", "GBPUSD", "USDJPY", "USDCHF",
-    "AUDUSD", "NZDUSD", "USDCAD",
-    "EURGBP", "EURJPY", "GBPJPY",
+    "XAUUSD", "BTCUSD", "EURUSD",
 ]
 
-PROTECTED_SYMBOLS: set[str] = {"XAUUSD", "BTCUSD"}
+PROTECTED_SYMBOLS: set[str] = {"XAUUSD", "BTCUSD", "EURUSD"}
 
 SYMBOL_PROPS: Dict[str, Dict[str, Any]] = {
     "XAUUSD":  {"digits": 2, "point": 0.01,  "category": "metals"},
     "BTCUSD":  {"digits": 2, "point": 0.01,  "category": "crypto"},
     "EURUSD":  {"digits": 5, "point": 1e-5,  "category": "forex"},
-    "GBPUSD":  {"digits": 5, "point": 1e-5,  "category": "forex"},
-    "USDJPY":  {"digits": 3, "point": 0.001,  "category": "forex"},
-    "USDCHF":  {"digits": 5, "point": 1e-5,  "category": "forex"},
-    "AUDUSD":  {"digits": 5, "point": 1e-5,  "category": "forex"},
-    "NZDUSD":  {"digits": 5, "point": 1e-5,  "category": "forex"},
-    "USDCAD":  {"digits": 5, "point": 1e-5,  "category": "forex"},
-    "EURGBP":  {"digits": 5, "point": 1e-5,  "category": "cross"},
-    "EURJPY":  {"digits": 3, "point": 0.001,  "category": "cross"},
-    "GBPJPY":  {"digits": 3, "point": 0.001,  "category": "cross"},
 }
 
 
@@ -116,6 +104,8 @@ class SymbolEngine:
 
         self._task_engine: asyncio.Task | None = None
         self._task_kronos: asyncio.Task | None = None
+        # In-memory paper position (Journal has no open-position tracking).
+        self._paper_position: dict | None = None
 
     # ── Snapshot for API ──────────────────────────────────────────────────
     def snapshot(self) -> dict:
@@ -250,11 +240,7 @@ class SymbolEngine:
         if count >= self.config["max_pyramid"]:
             return
         # confirmations fallback
-        try:
-            from engine import confirmations as _conf
-        except Exception:
-            _conf = _local_confirmations
-        conf = _conf(candles, ind)
+        conf = _local_confirmations(candles, ind)
         net = conf["bull"] - conf["bear"]
         strong = (is_long and net >= self.config["confirm_min"]) or \
                  (not is_long and -net >= self.config["confirm_min"])
@@ -303,6 +289,153 @@ class SymbolEngine:
             f"+{add} lots @ {result.price} (total vol: {total_volume + add})\n"
             f"Pyramid #{count + 1} | Ticket: {result.order}")
 
+    # ── Yahoo Finance paper trading fallback ─────────────────────────────
+    YAHOO_TICKERS = {
+        "XAUUSD": "GC=F", "BTCUSD": "BTC-USD",
+        "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X",
+        "USDJPY": "USDJPY=X", "EURJPY": "EURJPY=X",
+        "AUDUSD": "AUDUSD=X", "USDCAD": "USDCAD=X",
+        "USDCHF": "USDCHF=X", "NZDUSD": "NZDUSD=X",
+    }
+    YAHOO_INTERVALS = {"M1": "1m", "M5": "5m", "M15": "15m", "M30": "30m",
+                       "H1": "1h", "H4": "1h", "D1": "1d"}
+
+    async def _fetch_yahoo_candles(self) -> list:
+        try:
+            import yfinance as yf
+        except ImportError:
+            return []
+        ticker = self.YAHOO_TICKERS.get(self.symbol, self.symbol)
+        interval = self.YAHOO_INTERVALS.get(self.config["timeframe"], "15m")
+        try:
+            df = await asyncio.to_thread(
+                lambda: yf.Ticker(ticker).history(period="60d", interval=interval))
+            if df.empty:
+                return []
+            values = []
+            for idx, row in df.iterrows():
+                values.append({
+                    "time": int(idx.timestamp()),
+                    "open": float(row["Open"]),
+                    "high": float(row["High"]),
+                    "low": float(row["Low"]),
+                    "close": float(row["Close"]),
+                    "volume": float(row.get("Volume", 0) or 0),
+                })
+            return values[-320:]
+        except Exception:
+            return []
+
+    async def _get_yahoo_price(self) -> float:
+        try:
+            import yfinance as yf
+        except ImportError:
+            return 0.0
+        ticker = self.YAHOO_TICKERS.get(self.symbol, self.symbol)
+        try:
+            info = await asyncio.to_thread(lambda: yf.Ticker(ticker).info)
+            price = float(info.get("regularMarketPrice", 0) or
+                          info.get("previousClose", 0) or 0)
+            if price <= 0:
+                hist = await asyncio.to_thread(lambda: yf.Ticker(ticker).history(period="1d"))
+                if not hist.empty:
+                    price = float(hist["Close"].iloc[-1])
+            return price
+        except Exception:
+            return 0.0
+
+    async def _step_yahoo(self):
+        if not self.config["enabled"]:
+            self.state["status"] = "disabled"
+            return
+        if self.risk.halted and self.symbol not in PROTECTED_SYMBOLS:
+            self.state["status"] = "halted"
+            return
+
+        candles = await self._fetch_yahoo_candles()
+        if not candles:
+            self.state["status"] = "no_data"
+            return
+
+        bar = candles[-1]["time"]
+        if self.state["last_bar"] == bar:
+            return
+        self.state["last_bar"] = bar
+
+        from engine import indicators, signal as _signal, position_size
+
+        ind = indicators(candles)
+
+        # Manage the in-memory paper position: exit on SL/TP, else hold.
+        if self._paper_position is not None:
+            pp = self._paper_position
+            x = candles[-1]
+            exit_price = None
+            why = ""
+            if pp["side"] > 0 and x["low"] <= pp["stop"]:
+                exit_price, why = pp["stop"], "Stop"
+            elif pp["side"] > 0 and x["high"] >= pp["target"]:
+                exit_price, why = pp["target"], "Target"
+            elif pp["side"] < 0 and x["high"] >= pp["stop"]:
+                exit_price, why = pp["stop"], "Stop"
+            elif pp["side"] < 0 and x["low"] <= pp["target"]:
+                exit_price, why = pp["target"], "Target"
+            if exit_price is not None:
+                self.journal.add(mode="paper",
+                                 side="sell" if pp["side"] > 0 else "buy",
+                                 lots=pp["lots"], entry=pp["entry"],
+                                 exit=exit_price, strategy=self.config["strategy"],
+                                 reason=f"Yahoo paper exit: {why}",
+                                 raw={"symbol": self.symbol})
+                self._log({"type": "exit", "side": pp["side"], "lots": pp["lots"],
+                           "price": exit_price, "bar": bar, "reason": why})
+                self._paper_position = None
+                self.state["status"] = "scanning"
+                return
+            self.state["status"] = "in_position"
+            return
+
+        self.state["pyramid_count"] = 0
+        side, reason = _signal(self.config["strategy"], candles, len(candles) - 1, {}, ind)
+        self.state["signal"] = {"side": side, "reason": reason, "bar": bar}
+        if side == 0:
+            self.state["status"] = "scanning"
+            return
+
+        self._log({"type": "signal", "side": side, "reason": reason, "bar": bar})
+
+        # Paper trade execution
+        price = await self._get_yahoo_price()
+        if price <= 0:
+            self.state["error"] = "Could not fetch price"
+            return
+
+        av = ind["av"]
+        dist = max(av[-1] * self.config["atr_stop"], 0.1)
+        equity = 10000.0
+        size = position_size(self.config["sizer"], equity,
+                             self.config["risk_pct"], dist, price, state={})
+        size = round(min(max(size, 0.01), self.max_lot), 2)
+
+        stop = price - dist * side
+        target = price + dist * self.config["rr"] * side
+
+        self.state["trades"] += 1
+        self.state["status"] = "in_position"
+        self.state["error"] = None
+        self._paper_position = {"side": side, "entry": price, "stop": stop,
+                                "target": target, "lots": size, "bar": bar}
+        self.journal.add(mode="paper", side="buy" if side == 1 else "sell",
+                         lots=size, entry=price,
+                         strategy=self.config["strategy"],
+                         reason=f"Yahoo paper: {reason}",
+                         raw={"symbol": self.symbol, "stop": stop, "target": target})
+        self._log({"type": "entry", "side": side, "lots": size, "price": price,
+                    "bar": bar, "stop": stop, "target": target, "ticket": f"PAPER-{bar}"})
+        logger.info("[%s] PAPER %s %s @ %.4f SL=%.4f TP=%.4f",
+                    self.symbol, "BUY" if side == 1 else "SELL",
+                    size, price, stop, target)
+
     # ── Main engine step ──────────────────────────────────────────────────
     async def _step(self):
         if not self.config["enabled"]:
@@ -348,10 +481,6 @@ class SymbolEngine:
             self.state["status"] = "halted"
             return
         from engine import indicators, signal as _signal, position_size
-        try:
-            from engine import confirmations as _conf
-        except Exception:
-            _conf = _local_confirmations
         ind = indicators(candles)
         open_rows = list(await asyncio.to_thread(self.mt5.positions_get, symbol=self.symbol) or [])
         ours = [p for p in open_rows if p.magic == self.magic]
@@ -437,8 +566,11 @@ class SymbolEngine:
     async def run_engine_loop(self):
         while True:
             try:
-                await self._trail()
-                await self._step()
+                if self._mt5_ready["ok"] and self.mt5:
+                    await self._trail()
+                    await self._step()
+                else:
+                    await self._step_yahoo()
             except Exception as exc:
                 self.state["error"] = str(exc)
                 logger.warning("[%s] engine error: %s", self.symbol, exc)
@@ -452,42 +584,50 @@ class SymbolEngine:
 
         while True:
             try:
-                if self.kronos_ok and self._mt5_ready["ok"] and self.mt5:
-                    tf = self.mt5_timeframes.get(self.config["timeframe"])
-                    if tf:
-                        rates = await asyncio.to_thread(
-                            self.mt5.copy_rates_from_pos, self.symbol, tf,
-                            0, self.kronos_lookback + 50)
-                        if rates is not None and len(rates) >= self.kronos_lookback + 1:
-                            candles = [
-                                {"time": int(r["time"]), "open": float(r["open"]),
-                                 "high": float(r["high"]), "low": float(r["low"]),
-                                 "close": float(r["close"]),
-                                 "volume": float(r["tick_volume"])}
-                                for r in rates
-                            ]
-                            result = await asyncio.to_thread(
-                                self.kronos_engine.forecast_from_candles,
-                                candles,
-                                lookback=self.kronos_lookback,
-                                pred_len=self.kronos_pred_len,
-                                model_id=self.kronos_model_id,
-                                sample_count=2,
-                            )
-                            self.kronos_cache.update({
-                                "direction": result["direction"],
-                                "confidence": result["confidence"],
-                                "pct_change": result["metadata"]["pct_change"],
-                                "forecast_close": result["metadata"]["forecast_close"],
-                                "last_close": result["metadata"]["last_close"],
-                                "timestamp": int(time.time() * 1000),
-                                "error": None,
-                                "model": self.kronos_model_id,
-                            })
-                            logger.info("[%s] Kronos: dir=%s conf=%.2f pct=%.2f%%",
-                                        self.symbol, result["direction"],
-                                        result["confidence"],
-                                        result["metadata"]["pct_change"])
+                if self.kronos_ok:
+                    candles = None
+                    if self._mt5_ready["ok"] and self.mt5:
+                        tf = self.mt5_timeframes.get(self.config["timeframe"])
+                        if tf:
+                            rates = await asyncio.to_thread(
+                                self.mt5.copy_rates_from_pos, self.symbol, tf,
+                                0, self.kronos_lookback + 50)
+                            if rates is not None and len(rates) >= self.kronos_lookback + 1:
+                                candles = [
+                                    {"time": int(r["time"]), "open": float(r["open"]),
+                                     "high": float(r["high"]), "low": float(r["low"]),
+                                     "close": float(r["close"]),
+                                     "volume": float(r["tick_volume"])}
+                                    for r in rates
+                                ]
+                    else:
+                        candles = await self._fetch_yahoo_candles()
+                        if len(candles) < self.kronos_lookback + 1:
+                            candles = None
+
+                    if candles:
+                        result = await asyncio.to_thread(
+                            self.kronos_engine.forecast_from_candles,
+                            candles,
+                            lookback=self.kronos_lookback,
+                            pred_len=self.kronos_pred_len,
+                            model_id=self.kronos_model_id,
+                            sample_count=2,
+                        )
+                        self.kronos_cache.update({
+                            "direction": result["direction"],
+                            "confidence": result["confidence"],
+                            "pct_change": result["metadata"]["pct_change"],
+                            "forecast_close": result["metadata"]["forecast_close"],
+                            "last_close": result["metadata"]["last_close"],
+                            "timestamp": int(time.time() * 1000),
+                            "error": None,
+                            "model": self.kronos_model_id,
+                        })
+                        logger.info("[%s] Kronos: dir=%s conf=%.2f pct=%.2f%%",
+                                    self.symbol, result["direction"],
+                                    result["confidence"],
+                                    result["metadata"]["pct_change"])
             except Exception as exc:
                 self.kronos_cache["error"] = str(exc)
                 logger.warning("[%s] Kronos error: %s", self.symbol, exc)
@@ -513,11 +653,6 @@ class SymbolEngine:
         self.state["error"] = None
 
     def disable(self):
-        if self.symbol in PROTECTED_SYMBOLS:
-            # Protected symbols cannot be disabled automatically; only user API stop is allowed via explicit flag
-            # Keep enabled and just set status to paused? We'll keep enabled true.
-            self.state["status"] = "protected"
-            return
         self.config["enabled"] = False
         self.state["status"] = "stopped"
 
