@@ -1,4 +1,6 @@
 """Auric V2 execution-layer tests: deterministic and broker-independent."""
+import sqlite3
+
 import pytest
 
 from execution_v2 import (
@@ -51,6 +53,13 @@ def test_execution_ledger_is_durable(tmp_path):
     row = b.lookup("same-id")
     assert row is not None
     assert row["status"] == "filled"
+
+    # Duplicate reservation must not leave a SQLite writer lock behind.
+    other = sqlite3.connect(path, timeout=0.2)
+    other.execute("CREATE TABLE IF NOT EXISTS lock_probe(id INTEGER)")
+    other.execute("INSERT INTO lock_probe(id) VALUES(1)")
+    other.commit()
+    other.close()
 
 
 def test_paper_broker_pending_fill_and_target():
