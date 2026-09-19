@@ -134,6 +134,22 @@ export interface PositionsResponse {
   positions: Position[]
 }
 
+export interface PendingOrder {
+  ticket: number
+  symbol: string
+  side?: 'buy' | 'sell'
+  lots: number
+  entry: number
+  sl?: number
+  tp?: number
+  mode: 'paper' | 'live'
+  orderType?: 'limit' | 'stop'
+}
+
+export interface PendingOrdersResponse {
+  orders: PendingOrder[]
+}
+
 export interface JournalEntry {
   id?: number
   ts: string | number
