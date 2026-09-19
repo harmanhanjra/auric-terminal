@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Quote } from './types'
+import { getSessionToken } from './api'
 
 function wsUrl(): string {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  return `${proto}://${location.host}/ws/market`
+  const token = getSessionToken()
+  const url = new URL(`${proto}://${location.host}/ws/market`)
+  if (token) url.searchParams.set('token', token)
+  return url.toString()
 }
 
 export interface UseMarketFeedResult {
