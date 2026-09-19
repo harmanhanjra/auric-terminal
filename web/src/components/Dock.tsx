@@ -39,6 +39,12 @@ export function Dock({ live, onNavigate }: DockProps) {
     refetchInterval: 3000,
   })
 
+  const { data: pendingData, refetch: refetchPending } = useQuery({
+    queryKey: ['pending-orders', live],
+    queryFn: () => api.pendingOrders(live ? 'live' : 'paper'),
+    refetchInterval: 3000,
+  })
+
   const { data: journalData, refetch: refetchJournal } = useQuery({
     queryKey: ['journal'],
     queryFn: () => api.journal(50),
@@ -58,6 +64,7 @@ export function Dock({ live, onNavigate }: DockProps) {
   })
 
   const positions = positionsData?.positions ?? []
+  const pendingOrders = pendingData?.orders ?? []
   const journalEntries = journalData?.entries ?? []
   const engineLog = engineData?.log ?? []
   const engineRisk = engineData?.risk
@@ -84,6 +91,20 @@ export function Dock({ live, onNavigate }: DockProps) {
       await Promise.all([refetchPositions(), refetchJournal()])
     } catch (error) {
       setActionMessage(error instanceof Error ? error.message : 'Position action failed')
+    } finally {
+      setActionTicket(null)
+    }
+  }
+
+  const cancelPending = async (ticket: number) => {
+    setActionTicket(ticket)
+    setActionMessage(null)
+    try {
+      await api.cancelPending(ticket, live ? 'live' : 'paper')
+      setActionMessage(`Pending order #${ticket} cancelled`)
+      await Promise.all([refetchPending(), refetchJournal()])
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : 'Cancellation failed')
     } finally {
       setActionTicket(null)
     }
@@ -194,6 +215,7 @@ export function Dock({ live, onNavigate }: DockProps) {
           <button
             onClick={() => {
               refetchPositions()
+              refetchPending()
               refetchJournal()
               refetchEngine()
             }}
@@ -305,6 +327,60 @@ export function Dock({ live, onNavigate }: DockProps) {
             )}
           </div>
         )}
+
+        {activeTab === 'positions' && pendingOrders.length > 0 ? (
+          <div className="mt-3 border-t border-ink-700/60 pt-2">
+            <div className="mb-1.5 flex items-center justify-between px-1">
+              <span className="text-[9px] font-extrabold uppercase tracking-[0.1em] text-fg-500">
+                Pending orders
+              </span>
+              <span className="rounded bg-ink-800 px-1.5 py-0.5 text-[8px] font-bold text-fg-400">
+                {pendingOrders.length}
+              </span>
+            </div>
+            <table className="w-full text-left text-[10px]">
+              <thead>
+                <tr className="border-b border-ink-700/60 text-[8px] uppercase tracking-[0.1em] text-fg-600">
+                  <th className="pb-1 pl-2 font-medium">Symbol</th>
+                  <th className="pb-1 font-medium">Side</th>
+                  <th className="pb-1 font-medium">Type</th>
+                  <th className="pb-1 font-medium">Lots</th>
+                  <th className="pb-1 font-medium">Entry</th>
+                  <th className="pb-1 font-medium">SL / TP</th>
+                  <th className="pb-1 pr-2 text-right font-medium">Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-ink-800/50">
+                {pendingOrders.map((order) => (
+                  <tr key={order.ticket} className="hover:bg-ink-800/30">
+                    <td className="py-1.5 pl-2 font-bold text-fg-200">{order.symbol}</td>
+                    <td className={clsx(
+                      'py-1.5 font-bold uppercase',
+                      order.side === 'buy' ? 'text-bull-400' : 'text-bear-400',
+                    )}>
+                      {order.side ?? '—'}
+                    </td>
+                    <td className="py-1.5 uppercase text-fg-400">{order.orderType ?? 'pending'}</td>
+                    <td className="tnum py-1.5 text-fg-300">{order.lots.toFixed(2)}</td>
+                    <td className="tnum py-1.5 text-fg-300">{fmtPrice(order.entry)}</td>
+                    <td className="tnum py-1.5 text-fg-500">
+                      {order.sl ? fmtPrice(order.sl) : '—'} / {order.tp ? fmtPrice(order.tp) : '—'}
+                    </td>
+                    <td className="py-1.5 pr-2 text-right">
+                      <button
+                        disabled={actionTicket === order.ticket}
+                        onClick={() => cancelPending(order.ticket)}
+                        className="rounded border border-bear-500/25 bg-bear-500/8 px-2 py-1 text-[8px] font-bold text-bear-400 hover:bg-bear-500/15 disabled:opacity-30"
+                      >
+                        Cancel
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
 
         {/* TAB 2: TRADE JOURNAL */}
         {activeTab === 'journal' && (
