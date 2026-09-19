@@ -66,6 +66,7 @@ export interface Position {
   sl?: number
   tp?: number
   pnl: number
+  mode?: 'paper' | 'live'
 }
 
 export interface PositionsResponse {
@@ -95,16 +96,21 @@ export interface EngineSignal {
 }
 
 export interface EngineConfig {
+  risk_pct?: number
+  atr_stop?: number
+  rr?: number
   trail_atr?: number
   confirm_min?: number
   pyramid_frac?: number
   max_pyramid?: number
+  autoLive?: boolean
 }
 
 export interface EngineRisk {
   halted: boolean
   realized: number
   dailyLoss: number
+  maxSpreadPoints?: number
 }
 
 export interface EngineLogEntry {
@@ -134,6 +140,8 @@ export interface EngineStatus {
   pyramids: number
   config: EngineConfig
   risk: EngineRisk
+  manualLiveEnabled?: boolean
+  autoLiveEnabled?: boolean
 }
 
 export interface BacktestMetrics {
@@ -172,10 +180,33 @@ export interface KillResult {
 export interface OrderRequest {
   side: 'buy' | 'sell'
   lots: number
+  order_type: 'market' | 'limit' | 'stop'
+  entry_price?: number | null
   stop_loss?: number | null
   take_profit?: number | null
   mode: 'paper' | 'live'
   client_order_id: string
+}
+
+export interface RiskPreview {
+  symbol: string
+  equity: number
+  lots: number
+  riskUsd: number
+  rewardUsd?: number | null
+  rr?: number | null
+  margin?: number | null
+  spec: {
+    symbol: string
+    digits: number
+    point: number
+    tick_size: number
+    tick_value: number
+    contract_size: number
+    volume_min: number
+    volume_max: number
+    volume_step: number
+  }
 }
 
 export interface KronosDataset {
