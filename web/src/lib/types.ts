@@ -161,11 +161,13 @@ export interface BacktestResult {
 
 export interface OrderResult {
   accepted: boolean
+  status?: 'filled' | 'pending'
   mode: 'paper' | 'live'
   clientOrderId?: string
   ticket?: number
   deal?: number
-  fillPrice?: number
+  fillPrice?: number | null
+  entryPrice?: number
   source?: string
 }
 
