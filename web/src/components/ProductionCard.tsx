@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { AlertTriangle, CheckCircle2, RadioTower, ShieldCheck } from 'lucide-react'
 import { clsx } from 'clsx'
-import { api } from '../lib/api'
+import { api, setLiveKey, setSessionToken } from '../lib/api'
 
 export function ProductionCard({ activeSymbol }: { activeSymbol: string }) {
   const { data: status } = useQuery({
@@ -37,14 +37,27 @@ export function ProductionCard({ activeSymbol }: { activeSymbol: string }) {
             </div>
           </div>
         </div>
-        <span className={clsx(
-          'rounded border px-2 py-1 text-[8px] font-black uppercase tracking-[0.1em]',
-          readiness?.ready
-            ? 'border-bull-500/30 bg-bull-500/10 text-bull-400'
-            : 'border-bear-500/30 bg-bear-500/10 text-bear-400',
-        )}>
-          {readiness?.ready ? 'READY' : 'BLOCKED'}
-        </span>
+        <div className="flex items-center gap-1.5">
+          <span className={clsx(
+            'rounded border px-2 py-1 text-[8px] font-black uppercase tracking-[0.1em]',
+            readiness?.ready
+              ? 'border-bull-500/30 bg-bull-500/10 text-bull-400'
+              : 'border-bear-500/30 bg-bear-500/10 text-bear-400',
+          )}>
+            {readiness?.ready ? 'READY' : 'BLOCKED'}
+          </span>
+          <button
+            onClick={() => {
+              setSessionToken('')
+              setLiveKey('')
+              window.location.reload()
+            }}
+            className="rounded border border-ink-700 px-2 py-1 text-[8px] font-bold uppercase tracking-[0.08em] text-fg-500 hover:text-fg-200"
+            title="Clear operator session and live execution key"
+          >
+            Sign out
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-1.5 text-[9px]">
