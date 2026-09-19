@@ -43,17 +43,27 @@ from production_control import Principal, ProductionControlPlane
 
 logger = logging.getLogger("auric")
 
+def _secret_env(name: str, default: str = "") -> str:
+    """Read a secret from NAME_FILE when present, otherwise NAME."""
+    file_path = os.getenv(f"{name}_FILE", "").strip()
+    if file_path:
+        try:
+            return Path(file_path).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise RuntimeError(f"Unable to read {name}_FILE") from exc
+    return os.getenv(name, default)
+
 ROOT = Path(__file__).parent
 DB_PATH = Path(os.getenv("AURIC_DB_PATH", str(ROOT / "auric.db"))).expanduser()
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 SYMBOL = os.getenv("MT5_SYMBOL", "XAUUSD")
 TD_SYMBOL = os.getenv("TWELVE_DATA_SYMBOL", "XAU/USD")
-TD_KEY = os.getenv("TWELVE_DATA_API_KEY", "")
+TD_KEY = _secret_env("TWELVE_DATA_API_KEY")
 SOURCE = os.getenv("MARKET_DATA_SOURCE", "auto").lower()
 LIVE_ENABLED = os.getenv("ENABLE_LIVE_TRADING", "false").lower() == "true"
 # Manual live execution and autonomous live execution are deliberately separate.
 AUTO_LIVE_ENABLED = os.getenv("ENABLE_AUTO_LIVE_TRADING", "false").lower() == "true"
-LIVE_API_KEY = os.getenv("AURIC_LIVE_API_KEY", "")
+LIVE_API_KEY = _secret_env("AURIC_LIVE_API_KEY")
 MAX_LOT = float(os.getenv("MAX_LOT", "1.0"))
 MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "500.0"))
 MAX_SPREAD_POINTS = float(os.getenv("MAX_SPREAD_POINTS", "80"))
@@ -180,7 +190,7 @@ KRONOS_CACHE = {
 }
 
 # Telegram notification config
-TG_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TG_BOT_TOKEN = _secret_env("TELEGRAM_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 async def tg_notify(text: str):
@@ -298,8 +308,9 @@ async def init_mt5() -> bool:
     kwargs = {}
     if os.getenv("MT5_LOGIN"):
         kwargs["login"] = int(os.environ["MT5_LOGIN"])
-    if os.getenv("MT5_PASSWORD"):
-        kwargs["password"] = os.environ["MT5_PASSWORD"]
+    mt5_password = _secret_env("MT5_PASSWORD")
+    if mt5_password:
+        kwargs["password"] = mt5_password
     if os.getenv("MT5_SERVER"):
         kwargs["server"] = os.environ["MT5_SERVER"]
     mt5_ready = await asyncio.to_thread(mt5.initialize, **kwargs)
@@ -917,7 +928,7 @@ async def sync_news_feed() -> dict:
     if not url:
         return {"configured": False, "ingested": 0}
     headers = {"Accept": "application/json"}
-    api_key = os.getenv("NEWS_FEED_API_KEY", "").strip()
+    api_key = _secret_env("NEWS_FEED_API_KEY").strip()
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     async with httpx.AsyncClient(timeout=15) as client:
