@@ -344,9 +344,25 @@ class SymbolEngine:
         )
         sp_points = spread_points(tick.bid, tick.ask, spec)
         decision = self.risk.check(add, len(open_rows), total_volume, sp_points)
-        if not decision["allowed"]:
-            self.state["error"] = "; ".join(decision["reasons"])
-            self._log({"type": "blocked", "reasons": decision["reasons"], "bar": bar})
+        prod_reasons: list[str] = []
+        if self.control_plane:
+            account = await asyncio.to_thread(self.mt5.account_info)
+            symbol_volume = sum(float(o.volume) for o in open_rows if o.symbol == self.symbol)
+            prod_allowed, prod_reasons = self.control_plane.portfolio_gate(
+                requested_lots=add,
+                symbol_lots=symbol_volume,
+                total_lots=total_volume,
+                open_positions=len(open_rows),
+                margin_level=float(getattr(account, "margin_level", 0.0) or 0.0) if account else None,
+                margin_used=float(getattr(account, "margin", 0.0) or 0.0) if account else None,
+                equity=float(getattr(account, "equity", 0.0) or 0.0) if account else None,
+            )
+        else:
+            prod_allowed = True
+        reasons = list(decision["reasons"]) + list(prod_reasons)
+        if not decision["allowed"] or not prod_allowed:
+            self.state["error"] = "; ".join(reasons)
+            self._log({"type": "blocked", "reasons": reasons, "bar": bar})
             return
 
         price = normalize_price(tick.ask if is_long else tick.bid, spec)
@@ -681,8 +697,14 @@ class SymbolEngine:
         dist = max(av[-1] * self.config["atr_stop"], minimum_stop_distance(spec))
         stop = normalize_price(price - dist * side, spec)
         target = normalize_price(price + dist * self.config["rr"] * side, spec)
+        configured_risk_pct = float(self.config["risk_pct"])
+        production_risk_cap = (
+            float(self.control_plane.risk_policy()["maxRiskPerTradePct"])
+            if self.control_plane else configured_risk_pct
+        )
+        effective_risk_pct = min(configured_risk_pct, production_risk_cap)
         size = position_size_for_risk(
-            float(account.equity), self.config["risk_pct"], price, stop, spec, self.max_lot
+            float(account.equity), effective_risk_pct, price, stop, spec, self.max_lot
         )
         exposure = sum(float(p.volume) for p in open_rows)
         symbol_exposure = sum(float(p.volume) for p in ours)
