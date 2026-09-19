@@ -1087,6 +1087,19 @@ async def system_status(request: Request):
     }
 
 
+@app.get("/api/auth/whoami")
+async def whoami(request: Request):
+    principal = _request_principal(request)
+    if control.auth_required and not control.allowed(principal, "viewer"):
+        raise HTTPException(401, "Authentication required")
+    return {
+        "name": principal.name,
+        "role": principal.role,
+        "authenticated": principal.authenticated,
+        "authRequired": control.auth_required,
+    }
+
+
 @app.post("/api/system/stage")
 async def set_execution_stage(req: ExecutionStageRequest, request: Request):
     principal = _require_role(request, "admin")
@@ -1445,9 +1458,6 @@ async def close_position(ticket: int, req: ClosePositionRequest, request: Reques
     if not LIVE_ENABLED:
         raise HTTPException(403, "Manual live execution is disabled")
     _require_live_auth(request)
-    allowed, reason = control.trade_gate("ALL", "live", autonomous=False)
-    if not allowed:
-        raise HTTPException(403, reason)
     if not mt5_ready or not mt5:
         raise HTTPException(503, "MT5 terminal is not connected")
 
@@ -1808,6 +1818,12 @@ async def order(req: OrderRequest, request: Request):
         raise HTTPException(422, "Limit/stop orders require entry_price")
     if req.lots > MAX_LOT:
         raise HTTPException(422, f"Lot size exceeds server hard cap ({MAX_LOT})")
+    if (
+        req.mode == "live"
+        and os.getenv("REQUIRE_LIVE_STOP_LOSS", "true").lower() == "true"
+        and req.stop_loss is None
+    ):
+        raise HTTPException(422, "Production live orders require a stop loss")
 
     tick_info = latest_by_symbol.get(sym, {})
     if not tick_info and isinstance(latest, dict):
@@ -1918,6 +1934,13 @@ async def order(req: OrderRequest, request: Request):
             raise HTTPException(503, "MT5 symbol/tick unavailable")
         spec = spec_from_info(sym, info)
         lots = normalize_volume(lots, spec, MAX_LOT)
+        live_spread_points = spread_points(tick.bid, tick.ask, spec)
+        live_spread_limit = max_spread_points_for(sym)
+        if live_spread_points > live_spread_limit:
+            raise HTTPException(
+                403,
+                f"Live broker spread guard active ({live_spread_points:.1f} pts > {live_spread_limit:.1f} pts for {sym})",
+            )
         is_buy = req.side == "buy"
         pending = req.order_type != "market"
         if req.order_type == "market":
@@ -1931,6 +1954,19 @@ async def order(req: OrderRequest, request: Request):
             else:
                 typ = mt5.ORDER_TYPE_BUY_STOP if is_buy else mt5.ORDER_TYPE_SELL_STOP
             price = normalize_price(float(req.entry_price), spec)
+
+        account_now = await asyncio.to_thread(mt5.account_info)
+        if req.stop_loss is not None and account_now is not None:
+            stop_value = normalize_price(req.stop_loss, spec)
+            risk_usd = risk_per_lot(price, stop_value, spec) * lots
+            equity = float(getattr(account_now, "equity", 0.0) or 0.0)
+            risk_pct = risk_usd / equity * 100.0 if equity > 0 else 100.0
+            max_risk_pct = float(control.risk_policy()["maxRiskPerTradePct"])
+            if risk_pct > max_risk_pct:
+                raise HTTPException(
+                    403,
+                    f"Trade risk {risk_pct:.2f}% exceeds production cap {max_risk_pct:.2f}%",
+                )
 
         mt5_request = {
             "action": action,
