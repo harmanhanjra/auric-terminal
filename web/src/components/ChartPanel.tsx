@@ -289,7 +289,7 @@ export function ChartPanel({ quote, activeSymbol = 'XAUUSD', onSelectSymbol }: C
     updateIndicatorSeries(candles)
 
     chartRef.current?.timeScale().fitContent()
-  }, [candles, chartType, updateIndicatorSeries])
+  }, [candles, chartType])
 
   const updateIndicatorSeries = useCallback((candles: Candle[]) => {
     if (!chartRef.current) return
