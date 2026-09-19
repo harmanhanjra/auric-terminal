@@ -2,11 +2,13 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { clsx } from 'clsx'
 import {
   Activity,
+  DatabaseBackup,
   KeyRound,
   RefreshCw,
   ShieldCheck,
   ShieldOff,
   Siren,
+  CloudDownload,
 } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 import { api, ApiError, getAuthKey, setAuthKey } from '../lib/api'
@@ -72,6 +74,21 @@ export function ProductionOpsCard() {
       invalidate()
     },
     onError: (error) => setMessage(error instanceof Error ? error.message : 'Reconciliation failed'),
+  })
+
+  const backupMutation = useMutation({
+    mutationFn: api.backupNow,
+    onSuccess: (result) => setMessage(`Backup created: ${result.file}`),
+    onError: (error) => setMessage(error instanceof Error ? error.message : 'Backup failed'),
+  })
+
+  const newsSyncMutation = useMutation({
+    mutationFn: api.syncNews,
+    onSuccess: (result) => {
+      setMessage(result.configured ? `Calendar sync: ${result.ingested} event(s)` : 'No normalized news feed configured')
+      queryClient.invalidateQueries({ queryKey: ['news-events'] })
+    },
+    onError: (error) => setMessage(error instanceof Error ? error.message : 'Calendar sync failed'),
   })
 
   const production = status ?? readiness?.production
@@ -215,6 +232,20 @@ export function ProductionOpsCard() {
         >
           <RefreshCw className={clsx('h-3 w-3', reconcileMutation.isPending && 'animate-spin')} />
           Reconcile
+        </button>
+        <button
+          onClick={() => backupMutation.mutate()}
+          disabled={backupMutation.isPending}
+          className="flex h-8 items-center justify-center gap-1 rounded-md border border-ink-700 bg-ink-800 text-[8px] font-extrabold uppercase tracking-[0.08em] text-fg-300 hover:bg-ink-700 disabled:opacity-40"
+        >
+          <DatabaseBackup className="h-3 w-3" /> Backup
+        </button>
+        <button
+          onClick={() => newsSyncMutation.mutate()}
+          disabled={newsSyncMutation.isPending}
+          className="flex h-8 items-center justify-center gap-1 rounded-md border border-ink-700 bg-ink-800 text-[8px] font-extrabold uppercase tracking-[0.08em] text-fg-300 hover:bg-ink-700 disabled:opacity-40"
+        >
+          <CloudDownload className="h-3 w-3" /> Sync calendar
         </button>
         <button
           onClick={() => resumeMutation.mutate()}
