@@ -1,0 +1,30 @@
+# Replace trade.example.com with your domain.
+# Caddy automatically provisions and renews TLS certificates when DNS points here.
+trade.example.com {
+    encode zstd gzip
+
+    # Auric itself applies RBAC, request IDs, CSP and application rate limits.
+    reverse_proxy 127.0.0.1:8000 {
+        health_uri /api/health
+        health_interval 30s
+        health_timeout 5s
+    }
+
+    request_body {
+        max_size 10MB
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        -Server
+    }
+
+    log {
+        output file ./logs/auric-access.log {
+            roll_size 100MiB
+            roll_keep 10
+            roll_keep_for 720h
+        }
+        format json
+    }
+}
