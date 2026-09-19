@@ -414,7 +414,14 @@ async def update_realized():
         return
     start = datetime.combine(datetime.now().date(), dtime.min)
     deals = await asyncio.to_thread(mt5.history_deals_get, start, datetime.now()) or []
-    risk.realized = sum(float(d.profit or 0.0) for d in deals if d.magic == MAGIC)
+    risk.realized = sum(
+        float(getattr(d, "profit", 0.0) or 0.0)
+        + float(getattr(d, "commission", 0.0) or 0.0)
+        + float(getattr(d, "swap", 0.0) or 0.0)
+        + float(getattr(d, "fee", 0.0) or 0.0)
+        for d in deals
+        if getattr(d, "magic", None) == MAGIC
+    )
 
 def confirmations(candles, ind=None):
     bull = bear = 0
@@ -1400,6 +1407,8 @@ async def order(req: OrderRequest, request: Request):
         raise HTTPException(422, f"Symbol {sym} not tracked")
     if req.order_type != "market" and req.entry_price is None:
         raise HTTPException(422, "Limit/stop orders require entry_price")
+    if req.lots > MAX_LOT:
+        raise HTTPException(422, f"Lot size exceeds server hard cap ({MAX_LOT})")
 
     tick_info = latest_by_symbol.get(sym, {})
     if not tick_info and isinstance(latest, dict):
