@@ -983,6 +983,18 @@ async def reconcile_once() -> dict:
         "pendingTickets": [],
     }
     if mt5_ready and mt5:
+        day_start = datetime.combine(datetime.now().date(), dtime.min)
+        deals = list(await asyncio.to_thread(mt5.history_deals_get, day_start, datetime.now()) or [])
+        global_realized = sum(
+            float(getattr(d, "profit", 0.0) or 0.0)
+            + float(getattr(d, "commission", 0.0) or 0.0)
+            + float(getattr(d, "swap", 0.0) or 0.0)
+            + float(getattr(d, "fee", 0.0) or 0.0)
+            for d in deals
+            if getattr(d, "magic", None) == MAGIC
+        )
+        risk.realized = global_realized
+        summary["todayNetRealized"] = round(global_realized, 2)
         positions = [
             p for p in (list(await asyncio.to_thread(mt5.positions_get) or []))
             if getattr(p, "magic", None) == MAGIC
@@ -1015,6 +1027,13 @@ async def reconciliation_loop():
         try:
             summary = await reconcile_once()
             auto_active = AUTO_LIVE_ENABLED and control.execution_stage() == "auto"
+            if summary.get("todayNetRealized", 0.0) <= -MAX_DAILY_LOSS and not control.is_halted():
+                control.halt(
+                    f"Global Auric daily loss limit reached: {summary['todayNetRealized']:.2f}"
+                )
+                risk.kill()
+                for eng in ENGINES.values():
+                    eng.risk.kill()
             if auto_active and not control.is_halted():
                 if (
                     os.getenv("HALT_ON_BROKER_DISCONNECT", "true").lower() == "true"
