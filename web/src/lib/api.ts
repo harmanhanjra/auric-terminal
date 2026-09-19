@@ -16,6 +16,11 @@ import type {
   KronosForecast,
   KronosDataset,
   RiskPreview,
+  ProductionStatus,
+  Readiness,
+  NewsEvent,
+  ExecutionStage,
+  RiskPolicy,
 } from './types'
 
 export class ApiError extends Error {
@@ -27,29 +32,38 @@ export class ApiError extends Error {
   }
 }
 
-export const LIVE_KEY_STORAGE = 'auric.liveKey'
+export const LIVE_KEY_STORAGE = 'auric.liveKey.v3'
+export const AUTH_KEY_STORAGE = 'auric.authKey.v3'
 
-export function getLiveKey(): string {
+function getSessionSecret(key: string): string {
   try {
-    return localStorage.getItem(LIVE_KEY_STORAGE) || ''
+    return sessionStorage.getItem(key) || ''
   } catch {
     return ''
   }
 }
 
-export function setLiveKey(key: string): void {
+function setSessionSecret(key: string, value: string): void {
   try {
-    if (key) localStorage.setItem(LIVE_KEY_STORAGE, key)
-    else localStorage.removeItem(LIVE_KEY_STORAGE)
+    if (value) sessionStorage.setItem(key, value)
+    else sessionStorage.removeItem(key)
+    window.dispatchEvent(new Event('auric-credentials-changed'))
   } catch {
     /* ignore */
   }
 }
 
+export const getLiveKey = () => getSessionSecret(LIVE_KEY_STORAGE)
+export const setLiveKey = (key: string) => setSessionSecret(LIVE_KEY_STORAGE, key)
+export const getAuthKey = () => getSessionSecret(AUTH_KEY_STORAGE)
+export const setAuthKey = (key: string) => setSessionSecret(AUTH_KEY_STORAGE, key)
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   const liveKey = getLiveKey()
-  // Server fail-closes live mutations without a matching X-Auric-Key.
+  const authKey = getAuthKey()
+  // RBAC credential and high-risk live-execution credential are intentionally separate.
+  if (authKey) headers['X-Auric-Auth'] = authKey
   if (liveKey) headers['X-Auric-Key'] = liveKey
   const res = await fetch(path, {
     ...init,
@@ -76,6 +90,24 @@ export interface SymbolSummary {
 
 export const api = {
   health: () => request<Health>('/api/health'),
+  readiness: () => request<Readiness>('/api/readiness'),
+  systemStatus: () => request<ProductionStatus>('/api/system/status'),
+  setExecutionStage: (stage: ExecutionStage) =>
+    request<{ ok: boolean; executionStage: ExecutionStage }>('/api/system/stage', {
+      method: 'POST',
+      body: JSON.stringify({ stage }),
+    }),
+  resumeSystem: () => request<{ ok: boolean }>('/api/system/resume', { method: 'POST' }),
+  reconcile: () => request<Record<string, unknown>>('/api/reconcile', { method: 'POST' }),
+  newsEvents: () => request<{ events: NewsEvent[] }>('/api/news/events'),
+  addNewsEvent: (payload: Omit<NewsEvent, 'id' | 'enabled'>) =>
+    request<{ ok: boolean; id: number }>('/api/news/events', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  disableNewsEvent: (id: number) =>
+    request<{ ok: boolean }>(`/api/news/events/${id}/disable`, { method: 'POST' }),
+  riskPolicy: () => request<RiskPolicy>('/api/risk/policy'),
   quote: () => request<Quote>('/api/quote'),
   strategies: () => request<StrategiesResponse>('/api/strategies'),
   account: () => request<Account>('/api/account'),
@@ -122,6 +154,21 @@ export const api = {
   symbolStop: (symbol: string) =>
     request<EngineStatus>(`/api/symbols/${encodeURIComponent(symbol)}/stop`, { method: 'POST' }),
   kill: (mode: 'paper' | 'live') => request<KillResult>(`/api/kill?mode=${mode}`, { method: 'POST' }),
+  closePosition: (ticket: number, mode: 'paper' | 'live', lots?: number) =>
+    request<{ ok: boolean }>(`/api/positions/${ticket}/close`, {
+      method: 'POST',
+      body: JSON.stringify({ mode, lots: lots ?? null }),
+    }),
+  protectPosition: (
+    ticket: number,
+    mode: 'paper' | 'live',
+    payload: { sl?: number | null; tp?: number | null; breakeven?: boolean },
+  ) => request<{ ok: boolean }>(`/api/positions/${ticket}/protect`, {
+    method: 'POST',
+    body: JSON.stringify({ mode, ...payload }),
+  }),
+  cancelPending: (ticket: number, mode: 'paper' | 'live') =>
+    request<{ ok: boolean }>(`/api/pending/${ticket}?mode=${mode}`, { method: 'DELETE' }),
   kronosStatus: () => request<KronosStatus>('/api/kronos/status'),
   kronosDatasets: () => request<{ datasets: KronosDataset[] }>('/api/kronos/datasets'),
   kronosForecast: (payload: {
