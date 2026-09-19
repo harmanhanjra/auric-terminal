@@ -309,6 +309,48 @@ class PaperBroker:
         rows = [dict(v) for v in self._pending.values()]
         return [r for r in rows if r["symbol"] == symbol] if symbol else rows
 
+    def close_position(self, ticket: int, lots: float | None = None) -> dict:
+        if ticket not in self._positions:
+            raise KeyError("Paper position not found")
+        pos = self._positions[ticket]
+        close_lots = float(pos["lots"] if lots is None else lots)
+        if close_lots <= 0 or close_lots > float(pos["lots"]):
+            raise ValueError("Invalid close volume")
+        fraction = close_lots / float(pos["lots"])
+        realized = float(pos.get("pnl", 0.0)) * fraction
+        result = {
+            **dict(pos),
+            "exit": float(pos.get("market", pos["entry"])),
+            "closedLots": close_lots,
+            "pnl": realized,
+            "reason": "Manual close",
+        }
+        remaining = float(pos["lots"]) - close_lots
+        if remaining <= 1e-12:
+            del self._positions[ticket]
+        else:
+            pos["lots"] = remaining
+            pos["pnl"] = float(pos.get("pnl", 0.0)) - realized
+        return result
+
+    def protect_position(self, ticket: int, *, sl: float | None = None, tp: float | None = None,
+                         breakeven: bool = False) -> dict:
+        if ticket not in self._positions:
+            raise KeyError("Paper position not found")
+        pos = self._positions[ticket]
+        if breakeven:
+            pos["sl"] = float(pos["entry"])
+        elif sl is not None:
+            pos["sl"] = float(sl)
+        if tp is not None:
+            pos["tp"] = float(tp)
+        return dict(pos)
+
+    def cancel_pending(self, ticket: int) -> dict:
+        if ticket not in self._pending:
+            raise KeyError("Paper pending order not found")
+        return self._pending.pop(ticket)
+
     def flatten(self, symbol: str | None = None) -> tuple[int, int]:
         pos_ids = [k for k, v in self._positions.items() if symbol is None or v["symbol"] == symbol]
         ord_ids = [k for k, v in self._pending.items() if symbol is None or v["symbol"] == symbol]
