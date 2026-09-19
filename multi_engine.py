@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import time
+from datetime import datetime, time as dtime
 from typing import Any, Dict, List
 
 from execution_v2 import (
@@ -213,8 +214,26 @@ class SymbolEngine:
                            f"{self.kronos_cache['pct_change']:+.2f}%"),
                 "kronos_dir": k_dir, "confidence": conf}
 
+    async def _sync_realized(self):
+        """Refresh today's realized P/L for this strategy/symbol from broker history."""
+        if not self._mt5_ready["ok"] or not self.mt5:
+            return
+        start = datetime.combine(datetime.now().date(), dtime.min)
+        deals = await asyncio.to_thread(self.mt5.history_deals_get, start, datetime.now()) or []
+        self.risk.realized = sum(
+            float(getattr(d, "profit", 0.0) or 0.0)
+            + float(getattr(d, "commission", 0.0) or 0.0)
+            + float(getattr(d, "swap", 0.0) or 0.0)
+            + float(getattr(d, "fee", 0.0) or 0.0)
+            for d in deals
+            if getattr(d, "magic", None) == self.magic
+            and getattr(d, "symbol", None) == self.symbol
+        )
+
     # ── Trailing stop ─────────────────────────────────────────────────────
     async def _trail(self):
+        if self.risk.halted:
+            return
         if not self.config["enabled"] or not self.live_enabled or not self._mt5_ready["ok"] or not self.mt5:
             return
         if self.config["trail_atr"] <= 0:
@@ -534,6 +553,9 @@ class SymbolEngine:
         if not self._mt5_ready["ok"] or not self.mt5:
             self.state["status"] = "mt5_offline"
             return
+        await self._sync_realized()
+        if self.risk.realized <= -self.max_daily_loss:
+            self.risk.kill()
         if self.risk.halted:
             self.state["status"] = "halted"
             return
