@@ -6,6 +6,7 @@ import { ChartPanel } from './components/ChartPanel'
 import { OrderTicket } from './components/OrderTicket'
 import { DepthPanel } from './components/DepthPanel'
 import { EngineCard } from './components/EngineCard'
+import { ProductionOpsCard } from './components/ProductionOpsCard'
 import { Dock } from './components/Dock'
 import { StrategyModal } from './components/StrategyModal'
 import { BacktestModal } from './components/BacktestModal'
@@ -95,8 +96,9 @@ export default function App() {
             <OrderTicket quote={quote} live={live} activeSymbol={activeSymbol} />
           </div>
           <div className="min-h-0 flex-1 overflow-auto">
-            <DepthPanel quote={quote} />
+            <ProductionOpsCard />
             <EngineCard activeSymbol={activeSymbol} />
+            <DepthPanel quote={quote} />
           </div>
         </aside>
       </div>
