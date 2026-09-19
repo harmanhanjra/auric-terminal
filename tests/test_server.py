@@ -28,8 +28,12 @@ def make_candles(n=520):
 @pytest.fixture(scope="module")
 def client(tmp_path_factory):
     import server
+    from execution_v2 import ExecutionLedger, PaperBroker
     tmp = tmp_path_factory.mktemp("db")
-    server.journal = server.Journal(str(tmp / "test.db"))
+    db = str(tmp / "test.db")
+    server.journal = server.Journal(db)
+    server.execution_ledger = ExecutionLedger(db)
+    server.paper_broker = PaperBroker()
     with TestClient(server.app) as c:
         yield c
 
@@ -51,6 +55,7 @@ def test_health(client):
     body = r.json()
     assert body["ok"] is True
     assert body["liveTrading"] is False
+    assert body["autoLiveTrading"] is False
 
 
 def test_security_headers(client):
@@ -152,6 +157,8 @@ def test_order_paper(client, monkeypatch):
     body = r.json()
     assert body["accepted"] is True
     assert body["mode"] == "paper"
+    positions = client.get("/api/positions?mode=paper").json()["positions"]
+    assert any(p["symbol"] == "XAUUSD" and p["mode"] == "paper" for p in positions)
 
 
 def test_order_live_disabled(client):
@@ -238,3 +245,66 @@ def test_engine_endpoint(client):
     for key in ("running", "enabled", "strategy", "timeframe", "status",
                 "trades", "config", "risk"):
         assert key in body
+
+
+
+def test_risk_preview_symbol_aware(client):
+    r = client.post("/api/risk/preview", json={
+        "symbol": "XAUUSD", "side": "buy",
+        "entry": 5000, "stop": 4990, "target": 5020,
+        "risk_amount": 50, "risk_pct": 1,
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["lots"] == pytest.approx(0.05)
+    assert body["riskUsd"] == pytest.approx(50, abs=0.01)
+    assert body["rr"] == pytest.approx(2.0)
+
+
+def test_pending_order_requires_entry(client):
+    r = client.post("/api/orders", json={
+        "side": "buy", "lots": 0.05, "order_type": "limit",
+        "stop_loss": 4990, "take_profit": 5030,
+        "mode": "paper", "client_order_id": "pending-no-entry",
+    })
+    assert r.status_code == 422
+
+
+def test_durable_duplicate_order_id_rejected(client, monkeypatch):
+    import server
+    server.risk.halted = False
+    monkeypatch.setattr(server, "latest_by_symbol", {
+        "XAUUSD": {"symbol": "XAUUSD", "bid": 5000.0, "ask": 5000.18,
+                   "spread": 0.18, "source": "test", "timestamp": 1}
+    })
+    payload = {
+        "side": "buy", "lots": 0.01, "order_type": "market",
+        "stop_loss": 4990, "take_profit": 5020,
+        "mode": "paper", "client_order_id": "duplicate-v2-0001",
+    }
+    assert client.post("/api/orders", json=payload).status_code == 200
+    r = client.post("/api/orders", json=payload)
+    assert r.status_code == 409
+
+
+def test_global_paper_kill_flattens_all(client, monkeypatch):
+    import server
+    server.risk.halted = False
+    monkeypatch.setattr(server, "latest_by_symbol", {
+        "XAUUSD": {"symbol": "XAUUSD", "bid": 5000.0, "ask": 5000.18,
+                   "spread": 0.18, "source": "test", "timestamp": 1},
+        "EURUSD": {"symbol": "EURUSD", "bid": 1.0850, "ask": 1.0851,
+                   "spread": 0.0001, "source": "test", "timestamp": 1},
+    })
+    for symbol, client_id in [("XAUUSD", "kill-xau-v2"), ("EURUSD", "kill-eur-v2")]:
+        r = client.post("/api/orders", json={
+            "symbol": symbol, "side": "buy", "lots": 0.01, "order_type": "market",
+            "mode": "paper", "client_order_id": client_id,
+        })
+        assert r.status_code == 200
+    assert len(client.get("/api/positions?mode=paper").json()["positions"]) >= 2
+    killed = client.post("/api/kill?mode=paper").json()
+    assert killed["halted"] is True
+    assert killed["closed"] >= 2
+    assert client.get("/api/positions?mode=paper").json()["positions"] == []
+    client.post("/api/risk/reset")
