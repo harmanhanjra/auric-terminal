@@ -17,6 +17,7 @@ import {
 import { api } from '../lib/api'
 import { fmtMoney, fmtPrice } from '../lib/format'
 import type { Quote } from '../lib/types'
+import { AnimatedValue } from './ui/AnimatedValue'
 
 interface DockProps {
   quote: Quote
@@ -63,17 +64,17 @@ export function Dock({ live, onNavigate }: DockProps) {
   const totalPnl = positions.reduce((acc, p) => acc + (p.pnl || 0), 0)
 
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-ink-900 text-fg-200">
+    <div className="flex h-full flex-col overflow-hidden bg-ink-900/48 text-fg-200">
       {/* Dock Tab Bar */}
-      <div className="flex h-9 shrink-0 items-center justify-between border-b border-ink-700/70 bg-ink-950/80 px-3">
+      <div className="flex h-10 shrink-0 items-center justify-between border-b border-white/[0.055] bg-black/18 px-3">
         <div className="flex items-center gap-1">
           <button
             onClick={() => setActiveTab('positions')}
             className={clsx(
-              'flex items-center gap-1.5 rounded px-2.5 py-1 text-[11px] font-semibold transition-colors',
+              'flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[10px] font-semibold transition-colors',
               activeTab === 'positions'
-                ? 'bg-ink-800 text-gold-400 border border-gold-600/30'
-                : 'text-fg-400 hover:bg-ink-800/60 hover:text-fg-200',
+                ? 'border-gold-400/15 bg-gold-400/[0.07] text-gold-300'
+                : 'border-transparent text-fg-500 hover:bg-white/[0.04] hover:text-fg-200',
             )}
           >
             <Target className="h-3.5 w-3.5" />
@@ -88,10 +89,10 @@ export function Dock({ live, onNavigate }: DockProps) {
           <button
             onClick={() => setActiveTab('journal')}
             className={clsx(
-              'flex items-center gap-1.5 rounded px-2.5 py-1 text-[11px] font-semibold transition-colors',
+              'flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[10px] font-semibold transition-colors',
               activeTab === 'journal'
-                ? 'bg-ink-800 text-gold-400 border border-gold-600/30'
-                : 'text-fg-400 hover:bg-ink-800/60 hover:text-fg-200',
+                ? 'border-gold-400/15 bg-gold-400/[0.07] text-gold-300'
+                : 'border-transparent text-fg-500 hover:bg-white/[0.04] hover:text-fg-200',
             )}
           >
             <History className="h-3.5 w-3.5" />
@@ -106,10 +107,10 @@ export function Dock({ live, onNavigate }: DockProps) {
           <button
             onClick={() => setActiveTab('signals')}
             className={clsx(
-              'flex items-center gap-1.5 rounded px-2.5 py-1 text-[11px] font-semibold transition-colors',
+              'flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[10px] font-semibold transition-colors',
               activeTab === 'signals'
-                ? 'bg-ink-800 text-gold-400 border border-gold-600/30'
-                : 'text-fg-400 hover:bg-ink-800/60 hover:text-fg-200',
+                ? 'border-gold-400/15 bg-gold-400/[0.07] text-gold-300'
+                : 'border-transparent text-fg-500 hover:bg-white/[0.04] hover:text-fg-200',
             )}
           >
             <Activity className="h-3.5 w-3.5" />
@@ -122,10 +123,10 @@ export function Dock({ live, onNavigate }: DockProps) {
           <button
             onClick={() => setActiveTab('risk')}
             className={clsx(
-              'flex items-center gap-1.5 rounded px-2.5 py-1 text-[11px] font-semibold transition-colors',
+              'flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[10px] font-semibold transition-colors',
               activeTab === 'risk'
-                ? 'bg-ink-800 text-gold-400 border border-gold-600/30'
-                : 'text-fg-400 hover:bg-ink-800/60 hover:text-fg-200',
+                ? 'border-gold-400/15 bg-gold-400/[0.07] text-gold-300'
+                : 'border-transparent text-fg-500 hover:bg-white/[0.04] hover:text-fg-200',
             )}
           >
             <ShieldAlert className="h-3.5 w-3.5" />
@@ -140,10 +141,10 @@ export function Dock({ live, onNavigate }: DockProps) {
           <button
             onClick={() => setActiveTab('logs')}
             className={clsx(
-              'flex items-center gap-1.5 rounded px-2.5 py-1 text-[11px] font-semibold transition-colors',
+              'flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[10px] font-semibold transition-colors',
               activeTab === 'logs'
-                ? 'bg-ink-800 text-gold-400 border border-gold-600/30'
-                : 'text-fg-400 hover:bg-ink-800/60 hover:text-fg-200',
+                ? 'border-gold-400/15 bg-gold-400/[0.07] text-gold-300'
+                : 'border-transparent text-fg-500 hover:bg-white/[0.04] hover:text-fg-200',
             )}
           >
             <Terminal className="h-3.5 w-3.5" />
@@ -155,14 +156,14 @@ export function Dock({ live, onNavigate }: DockProps) {
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2 text-[10px]">
             <span className="text-fg-500">Floating P/L:</span>
-            <span
+            <AnimatedValue
+              value={totalPnl}
+              format={(value) => value >= 0 ? `+${fmtMoney(value)}` : fmtMoney(value)}
               className={clsx(
-                'tnum font-bold',
+                'font-bold',
                 totalPnl > 0 ? 'text-bull-500' : totalPnl < 0 ? 'text-bear-500' : 'text-fg-300',
               )}
-            >
-              {totalPnl >= 0 ? `+${fmtMoney(totalPnl)}` : fmtMoney(totalPnl)}
-            </span>
+            />
           </div>
           <button
             onClick={() => {
@@ -171,7 +172,7 @@ export function Dock({ live, onNavigate }: DockProps) {
               refetchEngine()
             }}
             title="Refresh tables"
-            className="grid h-6 w-6 place-items-center rounded text-fg-500 hover:bg-ink-800 hover:text-fg-200"
+            className="grid h-7 w-7 place-items-center rounded-lg border border-transparent text-fg-500 hover:border-white/[0.055] hover:bg-white/[0.04] hover:text-fg-200"
           >
             <RefreshCw className="h-3 w-3" />
           </button>
@@ -179,7 +180,7 @@ export function Dock({ live, onNavigate }: DockProps) {
       </div>
 
       {/* Dock Content Body */}
-      <div className="min-h-0 flex-1 overflow-auto p-2">
+      <div className="min-h-0 flex-1 overflow-auto p-2.5">
         {/* TAB 1: POSITIONS */}
         {activeTab === 'positions' && (
           <div>
@@ -313,7 +314,7 @@ export function Dock({ live, onNavigate }: DockProps) {
         {/* TAB 3: SIGNALS */}
         {activeTab === 'signals' && (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            <div className="rounded-lg border border-ink-700 bg-ink-800/80 p-3">
+            <div className="auric-surface rounded-xl p-3">
               <div className="text-[10px] font-bold uppercase tracking-wider text-fg-500">Active Strategy Signal</div>
               <div className="mt-2 flex items-center justify-between">
                 <span className="text-[14px] font-bold text-fg-100">
@@ -341,7 +342,7 @@ export function Dock({ live, onNavigate }: DockProps) {
               </div>
             </div>
 
-            <div className="rounded-lg border border-ink-700 bg-ink-800/80 p-3">
+            <div className="auric-surface rounded-xl p-3">
               <div className="text-[10px] font-bold uppercase tracking-wider text-fg-500">Engine Execution Mode</div>
               <div className="mt-2 flex items-center gap-2">
                 <span
@@ -363,7 +364,7 @@ export function Dock({ live, onNavigate }: DockProps) {
               </div>
             </div>
 
-            <div className="rounded-lg border border-ink-700 bg-ink-800/80 p-3">
+            <div className="auric-surface rounded-xl p-3">
               <div className="text-[10px] font-bold uppercase tracking-wider text-fg-500">Strategy Matrix Quick Launch</div>
               <p className="mt-1 text-[10px] text-fg-400">Access 19 algorithmic models and multi-timeframe backtesting.</p>
               <button
@@ -379,7 +380,7 @@ export function Dock({ live, onNavigate }: DockProps) {
         {/* TAB 4: RISK RADAR */}
         {activeTab === 'risk' && (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <div className="rounded-lg border border-ink-700 bg-ink-800/80 p-3">
+            <div className="auric-surface rounded-xl p-3">
               <div className="text-[10px] font-bold uppercase tracking-wider text-fg-500">Daily Loss Limit Check</div>
               <div className="mt-1.5 flex items-baseline justify-between">
                 <span className="text-[16px] font-bold text-fg-100">
@@ -402,7 +403,7 @@ export function Dock({ live, onNavigate }: DockProps) {
               </div>
             </div>
 
-            <div className="rounded-lg border border-ink-700 bg-ink-800/80 p-3">
+            <div className="auric-surface rounded-xl p-3">
               <div className="text-[10px] font-bold uppercase tracking-wider text-fg-500">Circuit Breaker Status</div>
               <div className="mt-2 flex items-center gap-2">
                 {engineRisk?.halted ? (
@@ -422,7 +423,7 @@ export function Dock({ live, onNavigate }: DockProps) {
               </div>
             </div>
 
-            <div className="rounded-lg border border-ink-700 bg-ink-800/80 p-3">
+            <div className="auric-surface rounded-xl p-3">
               <div className="text-[10px] font-bold uppercase tracking-wider text-fg-500">Account Free Margin Level</div>
               <div className="mt-1.5 flex items-baseline justify-between">
                 <span className="text-[16px] font-bold text-fg-100">
@@ -439,7 +440,7 @@ export function Dock({ live, onNavigate }: DockProps) {
 
         {/* TAB 5: ENGINE LOGS */}
         {activeTab === 'logs' && (
-          <div className="h-48 overflow-y-auto rounded bg-ink-950 p-2 font-mono text-[10px] text-fg-300">
+          <div className="auric-surface h-48 overflow-y-auto rounded-xl p-2.5 font-mono text-[10px] text-fg-300">
             {engineLog.length === 0 ? (
               <div className="text-fg-500">// Engine log initialized. Awaiting next tick/bar evaluation...</div>
             ) : (
