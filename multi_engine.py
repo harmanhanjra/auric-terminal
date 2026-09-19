@@ -57,7 +57,7 @@ class SymbolEngine:
                  magic: int, live_enabled: bool, max_lot: float,
                  max_daily_loss: float, journal, tg_notify_fn,
                  kronos_engine_mod, kronos_ok: bool, mt5_timeframes: dict,
-                 engine_mod, trade_guard_fn=None):
+                 engine_mod, trade_guard_fn=None, paper_enabled: bool = True):
         self.symbol = symbol
         self.mt5 = mt5_mod
         self._mt5_ready = mt5_ready_ref  # shared mutable ref
@@ -72,6 +72,7 @@ class SymbolEngine:
         self.mt5_timeframes = mt5_timeframes
         self.engine_mod = engine_mod
         self.trade_guard = trade_guard_fn
+        self.paper_enabled = paper_enabled
 
         # Per-symbol engine config (all symbols share same defaults)
         self.config: Dict[str, Any] = {
@@ -156,6 +157,7 @@ class SymbolEngine:
                 "pyramid_frac": self.config["pyramid_frac"],
                 "max_pyramid": self.config["max_pyramid"],
                 "autoLive": self.live_enabled,
+                "paperExecution": self.paper_enabled,
             },
             "risk": {
                 "halted": self.risk.halted,
@@ -553,6 +555,10 @@ class SymbolEngine:
             return
 
         self._log({"type": "signal", "side": side, "reason": reason, "bar": bar})
+        if not self.paper_enabled:
+            self.state["status"] = "shadow_signal"
+            self.state["error"] = None
+            return
         if tick is not None:
             price = float(tick.ask if side == 1 else tick.bid)
         else:
