@@ -12,10 +12,15 @@
   --color-fg-300: #a8b0c0;
   --color-fg-400: #8a93a8;
   --color-fg-500: #6b748a;
+  --color-fg-600: #4d5668;
   --color-gold-400: #c9a227;
   --color-gold-300: #debe5a;
   --color-gold-600: #8a6e1a;
+  --color-bull-300: #6ee7b7;
+  --color-bull-400: #34d399;
   --color-bull-500: #16c784;
+  --color-bear-300: #fda4af;
+  --color-bear-400: #fb7185;
   --color-bear-500: #ea3943;
   --color-bull: #16c784;
   --color-bear: #ea3943;
