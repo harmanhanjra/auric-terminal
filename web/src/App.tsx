@@ -13,6 +13,7 @@ import { BacktestModal } from './components/BacktestModal'
 import { AlertsModal } from './components/AlertsModal'
 import { KronosModal } from './components/KronosModal'
 import { openModal } from './components/Modal'
+import { AuricBackdrop } from './components/effects/AuricBackdrop'
 import { useMarketFeed } from './lib/useMarketFeed'
 import { api } from './lib/api'
 import type { Quote } from './lib/types'
@@ -69,44 +70,47 @@ export default function App() {
   }
 
   return (
-    <div className="terminal-grid flex h-screen flex-col overflow-hidden bg-ink-950 text-fg-200 selection:bg-gold-400/20">
-      <TopBar
-        quote={quote}
-        live={live}
-        onToggleLive={setLive}
-        feedStatus={status}
-        activeSymbol={activeSymbol}
-        onSelectSymbol={setActiveSymbol}
-      />
-      {/* Reliable grid: rail | main | aside — beautiful Bloomberg-inspired density */}
-      <div className="grid min-h-0 flex-1 grid-cols-[56px_minmax(0,1fr)_380px] overflow-hidden">
-        <Rail view={view} onNavigate={openModule} />
+    <div className="auric-shell relative h-screen overflow-hidden bg-ink-950 text-fg-200 selection:bg-gold-400/20">
+      <AuricBackdrop />
+      <div className="relative z-10 flex h-screen flex-col overflow-hidden">
+        <TopBar
+          quote={quote}
+          live={live}
+          onToggleLive={setLive}
+          feedStatus={status}
+          activeSymbol={activeSymbol}
+          onSelectSymbol={setActiveSymbol}
+        />
 
-        <div className="flex min-h-0 flex-col overflow-hidden border-r border-ink-700 bg-ink-950">
-          <div className="min-h-0 flex-1 overflow-hidden">
-            <ChartPanel quote={quote} activeSymbol={activeSymbol} onSelectSymbol={setActiveSymbol} />
-          </div>
-          <div className="h-[280px] shrink-0 overflow-hidden border-t border-ink-700 bg-ink-900">
-            <Dock quote={quote} live={live} view={view} onNavigate={openModule} />
-          </div>
+        <div className="terminal-workspace grid min-h-0 flex-1 grid-cols-[64px_minmax(0,1fr)_392px] overflow-hidden">
+          <Rail view={view} onNavigate={openModule} />
+
+          <main className="flex min-h-0 flex-col overflow-hidden border-r border-white/[0.055] bg-ink-950/72 backdrop-blur-[2px]">
+            <div className="min-h-0 flex-1 overflow-hidden">
+              <ChartPanel quote={quote} activeSymbol={activeSymbol} onSelectSymbol={setActiveSymbol} />
+            </div>
+            <div className="h-[280px] shrink-0 overflow-hidden border-t border-white/[0.055] bg-ink-900/72 backdrop-blur-xl">
+              <Dock quote={quote} live={live} view={view} onNavigate={openModule} />
+            </div>
+          </main>
+
+          <aside className="auric-side-panel flex min-h-0 flex-col overflow-hidden bg-ink-900/72 backdrop-blur-xl">
+            <div className="shrink-0 border-b border-white/[0.055]">
+              <OrderTicket quote={quote} live={live} activeSymbol={activeSymbol} />
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto">
+              <ProductionCard activeSymbol={activeSymbol} />
+              <DepthPanel quote={quote} />
+              <EngineCard activeSymbol={activeSymbol} />
+            </div>
+          </aside>
         </div>
 
-        <aside className="flex min-h-0 flex-col overflow-hidden bg-ink-900">
-          <div className="shrink-0 border-b border-ink-700">
-            <OrderTicket quote={quote} live={live} activeSymbol={activeSymbol} />
-          </div>
-          <div className="min-h-0 flex-1 overflow-auto">
-            <ProductionCard activeSymbol={activeSymbol} />
-            <DepthPanel quote={quote} />
-            <EngineCard activeSymbol={activeSymbol} />
-          </div>
-        </aside>
+        <StrategyModal />
+        <BacktestModal />
+        <AlertsModal />
+        <KronosModal />
       </div>
-
-      <StrategyModal />
-      <BacktestModal />
-      <AlertsModal />
-      <KronosModal />
     </div>
   )
 }
