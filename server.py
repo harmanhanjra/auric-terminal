@@ -584,7 +584,8 @@ async def engine_trail():
     candles = [{"open": float(r["open"]), "high": float(r["high"]), "low": float(r["low"]),
                 "close": float(r["close"])} for r in rates]
     av = atr(candles, 14)
-    trail = max(av[-1] * ENGINE_CONFIG["trail_atr"], 0.1)
+    from engine import round_price as _round_px, stop_distance as _stop_dist
+    trail = _stop_dist(SYMBOL, av[-1], ENGINE_CONFIG["trail_atr"])
     tick = await asyncio.to_thread(mt5.symbol_info_tick, SYMBOL)
     if not tick:
         return
@@ -601,9 +602,9 @@ async def engine_trail():
             new_sl = price + trail
             if new_sl < current_sl - 0.3 * av[-1]:
                 moved = new_sl
-        if moved is not None and await modify_sl(p.ticket, round(moved, 2), p.tp):
+        if moved is not None and await modify_sl(p.ticket, _round_px(SYMBOL, moved), p.tp):
             _engine_log({"type": "trail", "side": 1 if is_long else -1,
-                         "sl": round(moved, 2), "ticket": p.ticket})
+                         "sl": _round_px(SYMBOL, moved), "ticket": p.ticket})
 
 async def try_pyramid(candles, ind, ours, open_rows, bar):
     if ENGINE_CONFIG["confirm_min"] <= 0 or ENGINE_CONFIG["max_pyramid"] <= 0:
@@ -736,7 +737,8 @@ async def engine_step():
         ENGINE_STATE["error"] = "Account info unavailable"
         return
     av = ind["av"]
-    dist = max(av[-1] * ENGINE_CONFIG["atr_stop"], 0.1)
+    from engine import sl_tp as _sl_tp, stop_distance as _stop_dist2
+    dist = _stop_dist2(SYMBOL, av[-1], ENGINE_CONFIG["atr_stop"])
     size = position_size(ENGINE_CONFIG["sizer"], float(account.equity),
                          ENGINE_CONFIG["risk_pct"], dist, float(candles[-1]["close"]), state={})
     size = round(min(max(size, 0.01), MAX_LOT), 2)
@@ -753,12 +755,11 @@ async def engine_step():
         ENGINE_STATE["error"] = "No tick"
         return
     price = tick.ask if side == 1 else tick.bid
-    stop = price - dist * side
-    target = price + dist * ENGINE_CONFIG["rr"] * side
+    stop, target = _sl_tp(SYMBOL, price, side, dist, ENGINE_CONFIG["rr"])
     order_type = mt5.ORDER_TYPE_BUY if side == 1 else mt5.ORDER_TYPE_SELL
     request = {"action": mt5.TRADE_ACTION_DEAL, "symbol": SYMBOL, "volume": size,
-               "type": order_type, "price": price, "sl": round(stop, 2),
-               "tp": round(target, 2), "deviation": 20, "magic": MAGIC,
+               "type": order_type, "price": price, "sl": stop,
+               "tp": target, "deviation": 20, "magic": MAGIC,
                "comment": "AuricEngine", "type_time": mt5.ORDER_TIME_GTC,
                "type_filling": mt5.ORDER_FILLING_IOC}
     result = await asyncio.to_thread(mt5.order_send, request)
@@ -781,7 +782,7 @@ async def engine_step():
     await tg_notify(
         f"<b>Auric ENTRY</b> {dir_str} {SYMBOL}\n"
         f"Lots: {size} | Price: {result.price}\n"
-        f"SL: {round(stop, 2)} | TP: {round(target, 2)}\n"
+        f"SL: {stop} | TP: {target}\n"
         f"Strategy: {ENGINE_CONFIG['strategy']}{kronos_str}\n"
         f"Ticket: {result.order}")
 

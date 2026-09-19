@@ -294,9 +294,7 @@ class SymbolEngine:
         candles = [{"open": float(r["open"]), "high": float(r["high"]),
                     "low": float(r["low"]), "close": float(r["close"])} for r in closed]
         av = _atr(candles, 14)
-        info = await asyncio.to_thread(self.mt5.symbol_info, self.symbol)
-        spec = spec_from_info(self.symbol, info)
-        trail = max(av[-1] * self.config["trail_atr"], minimum_stop_distance(spec))
+        trail = max(av[-1] * self.config["trail_atr"], 0.1)
         tick = await asyncio.to_thread(self.mt5.symbol_info_tick, self.symbol)
         if not tick:
             return
@@ -316,13 +314,12 @@ class SymbolEngine:
             if moved is not None:
                 sl = normalize_price(moved, spec)
                 request = {"action": self.mt5.TRADE_ACTION_SLTP, "symbol": self.symbol,
-                           "position": p.ticket, "sl": sl,
-                           "tp": normalize_price(float(p.tp or 0.0), spec) if p.tp else 0.0,
-                           "type_time": self.mt5.ORDER_TIME_GTC}
+                           "position": p.ticket, "sl": round(moved, 2),
+                           "tp": float(p.tp or 0.0), "type_time": self.mt5.ORDER_TIME_GTC}
                 result = await asyncio.to_thread(self.mt5.order_send, request)
                 if result and result.retcode == self.mt5.TRADE_RETCODE_DONE:
                     self._log({"type": "trail", "side": 1 if is_long else -1,
-                               "sl": sl, "ticket": p.ticket})
+                               "sl": round(moved, 2), "ticket": p.ticket})
 
     # ── Pyramiding ────────────────────────────────────────────────────────
     async def _try_pyramid(self, candles, ind, ours, open_rows, bar):
@@ -570,17 +567,14 @@ class SymbolEngine:
         spec = spec_from_info(self.symbol, info) if info else fallback_spec(self.symbol)
         price = normalize_price(price, spec)
         av = ind["av"]
-        dist = max(av[-1] * self.config["atr_stop"], minimum_stop_distance(spec))
-        stop = normalize_price(price - dist * side, spec)
-        target = normalize_price(price + dist * self.config["rr"] * side, spec)
+        dist = max(av[-1] * self.config["atr_stop"], 0.1)
         equity = 10000.0
-        if self._mt5_ready["ok"] and self.mt5:
-            account = await asyncio.to_thread(self.mt5.account_info)
-            if account is not None:
-                equity = float(account.equity)
-        size = position_size_for_risk(
-            equity, self.config["risk_pct"], price, stop, spec, self.max_lot
-        )
+        size = position_size(self.config["sizer"], equity,
+                             self.config["risk_pct"], dist, price, state={})
+        size = round(min(max(size, 0.01), self.max_lot), 2)
+
+        stop = price - dist * side
+        target = price + dist * self.config["rr"] * side
 
         self.state["trades"] += 1
         self.state["status"] = "paper_position"
@@ -686,12 +680,10 @@ class SymbolEngine:
 
         price = normalize_price(tick.ask if side == 1 else tick.bid, spec)
         av = ind["av"]
-        dist = max(av[-1] * self.config["atr_stop"], minimum_stop_distance(spec))
-        stop = normalize_price(price - dist * side, spec)
-        target = normalize_price(price + dist * self.config["rr"] * side, spec)
-        size = position_size_for_risk(
-            float(account.equity), self.config["risk_pct"], price, stop, spec, self.max_lot
-        )
+        dist = max(av[-1] * self.config["atr_stop"], 0.1)
+        size = position_size(self.config["sizer"], float(account.equity),
+                             self.config["risk_pct"], dist, float(candles[-1]["close"]), state={})
+        size = round(min(max(size, 0.01), self.max_lot), 2)
         exposure = sum(float(p.volume) for p in open_rows)
         sp_points = spread_points(tick.bid, tick.ask, spec)
         decision = self.risk.check(size, len(open_rows), exposure, sp_points)
@@ -707,28 +699,15 @@ class SymbolEngine:
             self.state["status"] = "risk_blocked"
             self._log({"type": "blocked", "reason": portfolio["reason"], "bar": bar})
             return
-
+        price = tick.ask if side == 1 else tick.bid
+        stop = price - dist * side
+        target = price + dist * self.config["rr"] * side
         order_type = self.mt5.ORDER_TYPE_BUY if side == 1 else self.mt5.ORDER_TYPE_SELL
-        request = {
-            "action": self.mt5.TRADE_ACTION_DEAL,
-            "symbol": self.symbol,
-            "volume": size,
-            "type": order_type,
-            "price": price,
-            "sl": stop,
-            "tp": target,
-            "deviation": 20,
-            "magic": self.magic,
-            "comment": "AuricV3-Auto",
-            "type_time": self.mt5.ORDER_TIME_GTC,
-            "type_filling": choose_filling(self.mt5, spec),
-        }
-        check = await asyncio.to_thread(self.mt5.order_check, request)
-        if check is not None and getattr(check, "retcode", 0) not in (0, getattr(self.mt5, "TRADE_RETCODE_DONE", 10009)):
-            self.state["error"] = f"MT5 preflight rejected order: {getattr(check, 'comment', 'unknown')}"
-            self.state["status"] = "rejected"
-            self._log({"type": "rejected", "reason": self.state["error"], "bar": bar})
-            return
+        request = {"action": self.mt5.TRADE_ACTION_DEAL, "symbol": self.symbol, "volume": size,
+                   "type": order_type, "price": price, "sl": round(stop, 2),
+                   "tp": round(target, 2), "deviation": 20, "magic": self.magic,
+                   "comment": "AuricEngine", "type_time": self.mt5.ORDER_TIME_GTC,
+                   "type_filling": self.mt5.ORDER_FILLING_IOC}
         result = await asyncio.to_thread(self.mt5.order_send, request)
         if result is None or result.retcode != self.mt5.TRADE_RETCODE_DONE:
             self.state["error"] = f"MT5 rejected order: {getattr(result, 'comment', 'no response')}"
@@ -748,10 +727,9 @@ class SymbolEngine:
         await self.tg_notify(
             f"<b>Auric V2 ENTRY</b> {'LONG' if side == 1 else 'SHORT'} {self.symbol}\n"
             f"Lots: {size} | Price: {result.price}\n"
-            f"SL: {stop} | TP: {target}\n"
-            f"Strategy: {self.config['strategy']} | Spread: {sp_points:.1f} pts\n"
-            f"Ticket: {result.order}"
-        )
+            f"SL: {round(stop, 2)} | TP: {round(target, 2)}\n"
+            f"Strategy: {self.config['strategy']}{kronos_str}\n"
+            f"Ticket: {result.order}")
 
     # ── Background loops ──────────────────────────────────────────────────
     async def run_engine_loop(self):

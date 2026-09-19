@@ -5,7 +5,8 @@ import pytest
 
 from engine import (SIZERS, STRATEGIES, Journal, RiskManager, atr, backtest,
                     indicators, monte_carlo, optimize, position_size, rsi,
-                    signal, sma, ema, stdev)
+                    round_price, signal, sl_tp, sma, ema, stdev, stop_distance,
+                    to_pips)
 
 
 def make_candles(n=520, start=4950.0, seed=144021):
@@ -263,3 +264,34 @@ def test_journal_limit(tmp_path):
     assert len(j.list(2)) == 2
     assert len(j.list(100)) == 5
     j.db.close()
+
+
+# --- per-symbol SL/TP pip logic ------------------------------------------
+
+def test_round_price_uses_symbol_digits():
+    assert round_price("EURUSD", 1.149855) == pytest.approx(1.14986)
+    assert round_price("XAUUSD", 4320.456) == pytest.approx(4320.46)
+    assert round_price("BTCUSD", 76468.555) == pytest.approx(76468.55)
+
+
+def test_stop_distance_floor_is_per_symbol():
+    # flat 0.1 would be 1000 pips on EURUSD and dust on BTCUSD
+    assert stop_distance("EURUSD", 0.0001, 1.5) == pytest.approx(0.0005)
+    assert stop_distance("BTCUSD", 0.5, 1.5) == pytest.approx(50.0)
+    assert stop_distance("XAUUSD", 0.1, 1.5) == pytest.approx(0.5)
+    assert stop_distance("XAUUSD", 10.0, 1.5) == pytest.approx(15.0)
+
+
+def test_sl_tp_direction_and_rounding():
+    sl, tp = sl_tp("EURUSD", 1.14985, -1, 0.0015, 2)
+    assert sl == pytest.approx(1.15135)
+    assert tp == pytest.approx(1.14685)
+    sl, tp = sl_tp("XAUUSD", 4320.46, 1, 5.0, 2)
+    assert sl == pytest.approx(4315.46)
+    assert tp == pytest.approx(4330.46)
+
+
+def test_to_pips():
+    assert to_pips("EURUSD", 0.0015) == pytest.approx(15.0)
+    assert to_pips("XAUUSD", 5.0) == pytest.approx(50.0)
+    assert to_pips("BTCUSD", 50.0) == pytest.approx(50.0)
