@@ -1,0 +1,12 @@
+{
+  "events": [
+    {
+      "timestamp": "2026-09-22T12:30:00Z",
+      "title": "Example high-impact release",
+      "symbols": ["XAUUSD", "EURUSD"],
+      "importance": "high",
+      "minutes_before": 15,
+      "minutes_after": 20
+    }
+  ]
+}
