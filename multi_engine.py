@@ -57,7 +57,7 @@ class SymbolEngine:
                  magic: int, live_enabled: bool, max_lot: float,
                  max_daily_loss: float, journal, tg_notify_fn,
                  kronos_engine_mod, kronos_ok: bool, mt5_timeframes: dict,
-                 engine_mod, control_plane=None):
+                 engine_mod, control_plane=None, execution_ledger=None):
         self.symbol = symbol
         self.mt5 = mt5_mod
         self._mt5_ready = mt5_ready_ref  # shared mutable ref
@@ -72,6 +72,7 @@ class SymbolEngine:
         self.mt5_timeframes = mt5_timeframes
         self.engine_mod = engine_mod
         self.control_plane = control_plane
+        self.execution_ledger = execution_ledger
 
         # Per-symbol engine config (all symbols share same defaults)
         self.config: Dict[str, Any] = {
@@ -360,20 +361,36 @@ class SymbolEngine:
             "tp": normalize_price(float(pos.tp), spec) if pos.tp else 0.0,
             "deviation": 20,
             "magic": self.magic,
-            "comment": "AuricEngine+",
+            "comment": "AuricV3-Pyramid",
             "type_time": self.mt5.ORDER_TIME_GTC,
             "type_filling": choose_filling(self.mt5, spec),
         }
+        client_order_id = f"auto-pyramid-{self.symbol}-{bar}-{count + 1}"
+        if self.execution_ledger and not self.execution_ledger.reserve(
+            client_order_id, self.symbol, "live", "market", request
+        ):
+            self._log({"type": "duplicate_blocked", "reason": client_order_id, "bar": bar})
+            return
         check = await asyncio.to_thread(self.mt5.order_check, request)
         if check is not None and getattr(check, "retcode", 0) not in (0, getattr(self.mt5, "TRADE_RETCODE_DONE", 10009)):
             self.state["error"] = f"MT5 preflight rejected pyramid: {getattr(check, 'comment', 'unknown')}"
+            if self.execution_ledger:
+                self.execution_ledger.fail(client_order_id, self.state["error"])
             self._log({"type": "rejected", "reason": self.state["error"], "bar": bar})
             return
         result = await asyncio.to_thread(self.mt5.order_send, request)
         if result is None or result.retcode != self.mt5.TRADE_RETCODE_DONE:
             self.state["error"] = f"MT5 rejected pyramid: {getattr(result, 'comment', 'no response')}"
+            if self.execution_ledger:
+                self.execution_ledger.fail(client_order_id, self.state["error"])
             self._log({"type": "rejected", "reason": self.state["error"], "bar": bar})
             return
+        if self.execution_ledger:
+            self.execution_ledger.complete(
+                client_order_id,
+                {"accepted": True, "ticket": result.order, "price": result.price, "kind": "pyramid"},
+                result.order,
+            )
 
         self.state["pyramid_count"] = count + 1
         self.state["trades"] += 1
@@ -696,22 +713,39 @@ class SymbolEngine:
             "tp": target,
             "deviation": 20,
             "magic": self.magic,
-            "comment": "AuricV2-Auto",
+            "comment": "AuricV3-Auto",
             "type_time": self.mt5.ORDER_TIME_GTC,
             "type_filling": choose_filling(self.mt5, spec),
         }
+        client_order_id = f"auto-{self.symbol}-{bar}-{side}"
+        if self.execution_ledger and not self.execution_ledger.reserve(
+            client_order_id, self.symbol, "live", "market", request
+        ):
+            self.state["status"] = "duplicate_blocked"
+            self._log({"type": "duplicate_blocked", "reason": client_order_id, "bar": bar})
+            return
         check = await asyncio.to_thread(self.mt5.order_check, request)
         if check is not None and getattr(check, "retcode", 0) not in (0, getattr(self.mt5, "TRADE_RETCODE_DONE", 10009)):
             self.state["error"] = f"MT5 preflight rejected order: {getattr(check, 'comment', 'unknown')}"
             self.state["status"] = "rejected"
+            if self.execution_ledger:
+                self.execution_ledger.fail(client_order_id, self.state["error"])
             self._log({"type": "rejected", "reason": self.state["error"], "bar": bar})
             return
         result = await asyncio.to_thread(self.mt5.order_send, request)
         if result is None or result.retcode != self.mt5.TRADE_RETCODE_DONE:
             self.state["error"] = f"MT5 rejected order: {getattr(result, 'comment', 'no response')}"
             self.state["status"] = "rejected"
+            if self.execution_ledger:
+                self.execution_ledger.fail(client_order_id, self.state["error"])
             self._log({"type": "rejected", "reason": self.state["error"], "bar": bar})
             return
+        if self.execution_ledger:
+            self.execution_ledger.complete(
+                client_order_id,
+                {"accepted": True, "ticket": result.order, "price": result.price, "kind": "auto"},
+                result.order,
+            )
 
         self.state["trades"] += 1
         self.state["status"] = "in_position"
