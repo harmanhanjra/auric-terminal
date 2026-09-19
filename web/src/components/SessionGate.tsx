@@ -1,4 +1,5 @@
-import { FormEvent, useState } from 'react'
+import { useState } from 'react'
+import type { FormEvent } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { LockKeyhole, ShieldCheck } from 'lucide-react'
 import { api, getSessionToken, setSessionToken } from '../lib/api'
