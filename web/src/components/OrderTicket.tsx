@@ -5,6 +5,7 @@ import { Calculator, LockKeyhole, TrendingDown, TrendingUp } from 'lucide-react'
 import { api, getLiveKey, setLiveKey } from '../lib/api'
 import { fmtMoney, fmtPrice } from '../lib/format'
 import type { Quote } from '../lib/types'
+import { Button } from './ui/Button'
 
 interface OrderTicketProps {
   quote: Quote
@@ -118,7 +119,7 @@ export function OrderTicket({ quote, live, activeSymbol = 'XAUUSD' }: OrderTicke
   )
 
   return (
-    <section className="border-b border-ink-700/80 bg-ink-900/80 p-3">
+    <section className="border-b border-white/[0.055] bg-ink-900/58 p-3">
       <div className="mb-3 flex items-center justify-between">
         <div>
           <div className="text-[10px] font-extrabold uppercase tracking-[0.14em] text-fg-300">
@@ -138,16 +139,16 @@ export function OrderTicket({ quote, live, activeSymbol = 'XAUUSD' }: OrderTicke
         </span>
       </div>
 
-      <div className="mb-3 grid grid-cols-3 rounded-lg border border-ink-700 bg-ink-950/70 p-1">
+      <div className="mb-3 grid grid-cols-3 rounded-xl border border-white/[0.06] bg-black/18 p-1 shadow-[inset_0_1px_0_rgba(255,255,255,.02)]">
         {(['market', 'limit', 'stop'] as const).map((t) => (
           <button
             key={t}
             onClick={() => setOrderType(t)}
             className={clsx(
-              'rounded-md py-1.5 text-[9px] font-extrabold uppercase tracking-[0.12em] transition-colors',
+              'rounded-lg py-1.5 text-[9px] font-extrabold uppercase tracking-[0.12em] transition-colors',
               orderType === t
-                ? 'bg-ink-700 text-fg-100 shadow-sm'
-                : 'text-fg-500 hover:bg-ink-800 hover:text-fg-300',
+                ? 'bg-white/[0.07] text-fg-100 shadow-[inset_0_0_0_1px_rgba(255,255,255,.045)]'
+                : 'text-fg-500 hover:bg-white/[0.04] hover:text-fg-300',
             )}
           >
             {t}
@@ -163,7 +164,7 @@ export function OrderTicket({ quote, live, activeSymbol = 'XAUUSD' }: OrderTicke
         )}
 
         <Field label="Sizing model">
-          <div className="grid h-8 grid-cols-2 rounded-md border border-ink-700 bg-ink-800 p-0.5">
+          <div className="grid h-8 grid-cols-2 rounded-lg border border-white/[0.06] bg-black/18 p-0.5">
             <button
               onClick={() => setSizingMode('risk')}
               className={clsx('rounded text-[9px] font-bold', sizingMode === 'risk' ? 'bg-gold-600/20 text-gold-300' : 'text-fg-500')}
@@ -185,7 +186,7 @@ export function OrderTicket({ quote, live, activeSymbol = 'XAUUSD' }: OrderTicke
           </Field>
         ) : (
           <Field label="Size · lots">
-            <div className="flex h-8 items-center justify-between rounded-md border border-ink-700 bg-ink-800 px-1">
+            <div className="auric-field flex h-8 items-center justify-between rounded-lg px-1">
               <button onClick={() => adjustLots(-0.01)} className="h-6 w-7 rounded text-fg-400 hover:bg-ink-700" aria-label="Decrease lots">−</button>
               <span className="tnum text-[12px] font-semibold text-fg-100">{manualLots.toFixed(2)}</span>
               <button onClick={() => adjustLots(0.01)} className="h-6 w-7 rounded text-fg-400 hover:bg-ink-700" aria-label="Increase lots">+</button>
@@ -201,7 +202,7 @@ export function OrderTicket({ quote, live, activeSymbol = 'XAUUSD' }: OrderTicke
         </Field>
       </div>
 
-      <div className="mt-3 rounded-lg border border-ink-700/80 bg-ink-950/60 p-2.5">
+      <div className="auric-surface mt-3 rounded-xl p-2.5">
         <div className="mb-2 flex items-center justify-between text-[9px]">
           <span className="flex items-center gap-1 font-bold uppercase tracking-[0.1em] text-fg-500">
             <Calculator className="h-3 w-3" /> Broker-aware sizing
@@ -214,7 +215,7 @@ export function OrderTicket({ quote, live, activeSymbol = 'XAUUSD' }: OrderTicke
           <Summary label="Reward" value={preview?.rewardUsd != null ? fmtMoney(preview.rewardUsd) : '—'} tone="text-bull-400" />
           <Summary label="R:R" value={rr ? `1:${Number(rr).toFixed(2)}` : '—'} tone="text-gold-300" />
         </div>
-        <div className="mt-2 flex items-center justify-between border-t border-ink-800 pt-2 text-[9px] text-fg-500">
+        <div className="mt-2 flex items-center justify-between border-t border-white/[0.055] pt-2 text-[9px] text-fg-500">
           <span>Margin estimate</span>
           <span className="tnum text-fg-300">{preview?.margin != null ? fmtMoney(preview.margin) : 'Broker quote required'}</span>
         </div>
@@ -223,7 +224,7 @@ export function OrderTicket({ quote, live, activeSymbol = 'XAUUSD' }: OrderTicke
       {live && (
         <div className="mt-3">
           <Field label="Live execution key">
-            <div className="flex h-8 items-center gap-2 rounded-md border border-ink-700 bg-ink-800 px-2 focus-within:border-gold-600/60">
+            <div className="auric-field flex h-8 items-center gap-2 rounded-lg px-2">
               <LockKeyhole className="h-3.5 w-3.5 text-fg-500" />
               <input
                 type="password"
@@ -244,26 +245,28 @@ export function OrderTicket({ quote, live, activeSymbol = 'XAUUSD' }: OrderTicke
       )}
 
       <div className="mt-3 grid grid-cols-2 gap-2">
-        <button
+        <Button
+          variant="sell"
           disabled={pending || lots <= 0}
           onClick={() => submit('sell')}
-          className="group flex h-12 items-center justify-between rounded-lg border border-bear-500/35 bg-bear-500/10 px-3 text-bear-300 transition hover:bg-bear-500/18 disabled:opacity-40"
+          className="group h-12 justify-between rounded-xl px-3"
         >
           <span className="flex items-center gap-2 text-[11px] font-extrabold uppercase tracking-[0.08em]">
             <TrendingDown className="h-4 w-4" /> Sell
           </span>
-          <span className="tnum text-[10px] text-bear-200/80">{fmtPrice(quote.bid || quote.price)}</span>
-        </button>
-        <button
+          <span className="tnum text-[10px] text-white/75">{fmtPrice(quote.bid || quote.price)}</span>
+        </Button>
+        <Button
+          variant="primary"
           disabled={pending || lots <= 0}
           onClick={() => submit('buy')}
-          className="group flex h-12 items-center justify-between rounded-lg border border-bull-500/35 bg-bull-500/10 px-3 text-bull-300 transition hover:bg-bull-500/18 disabled:opacity-40"
+          className="group h-12 justify-between rounded-xl px-3"
         >
           <span className="flex items-center gap-2 text-[11px] font-extrabold uppercase tracking-[0.08em]">
             <TrendingUp className="h-4 w-4" /> Buy
           </span>
-          <span className="tnum text-[10px] text-bull-200/80">{fmtPrice(quote.ask || quote.price)}</span>
-        </button>
+          <span className="tnum text-[10px] text-white/75">{fmtPrice(quote.ask || quote.price)}</span>
+        </Button>
       </div>
 
       {status && (
@@ -302,7 +305,7 @@ function Input({
   prefix?: string
 }) {
   return (
-    <div className="flex h-8 items-center gap-1 rounded-md border border-ink-700 bg-ink-800 px-2 focus-within:border-gold-600/60">
+    <div className="auric-field flex h-8 items-center gap-1 rounded-lg px-2">
       {prefix ? <span className="text-[10px] text-fg-500">{prefix}</span> : null}
       <input
         value={value}
