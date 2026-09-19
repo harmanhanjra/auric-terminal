@@ -883,14 +883,22 @@ async def reconcile_once() -> dict:
             p for p in (list(await asyncio.to_thread(mt5.orders_get) or []))
             if getattr(p, "magic", None) == MAGIC
         ]
+        position_tickets = {int(p.ticket) for p in positions}
+        pending_tickets = {int(p.ticket) for p in pending}
+        tracked_tickets = execution_ledger.broker_tickets("live")
+        broker_tickets = position_tickets | pending_tickets
+        untracked = sorted(broker_tickets - tracked_tickets)
         summary.update({
             "livePositions": len(positions),
             "livePending": len(pending),
-            "positionTickets": [int(p.ticket) for p in positions],
-            "pendingTickets": [int(p.ticket) for p in pending],
+            "positionTickets": sorted(position_tickets),
+            "pendingTickets": sorted(pending_tickets),
+            "trackedBrokerTickets": len(tracked_tickets),
+            "untrackedBrokerTickets": untracked,
         })
-    control.record_reconciliation("ok", summary)
-    return summary
+    status = "warning" if summary.get("untrackedBrokerTickets") else "ok"
+    control.record_reconciliation(status, summary)
+    return {"status": status, **summary}
 
 
 async def reconciliation_loop():
@@ -938,6 +946,7 @@ async def lifespan(_: FastAPI):
             mt5_timeframes=MT5_TIMEFRAMES,
             engine_mod=None,
             control_plane=control,
+            execution_ledger=execution_ledger,
         )
         ENGINES[sym] = eng
         # Start background tasks for every symbol; enable/disable only gates
