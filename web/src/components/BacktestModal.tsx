@@ -47,15 +47,16 @@ export function BacktestModal() {
 
   const result = mutation.data
   const metrics = result?.metrics
-  const curve = result?.equity_curve ?? []
+  const curve = result?.equity_curve
 
   const curvePath = useMemo(() => {
-    if (curve.length < 2) return null
-    const mn = Math.min(...curve)
-    const mx = Math.max(...curve)
+    const values = curve ?? []
+    if (values.length < 2) return null
+    const mn = Math.min(...values)
+    const mx = Math.max(...values)
     const range = mx - mn || 1
-    const step = Math.max(1, Math.floor(curve.length / 240))
-    const pts = curve
+    const step = Math.max(1, Math.floor(values.length / 240))
+    const pts = values
       .filter((_, i) => i % step === 0)
       .map((v, i, a) => `${(i / (a.length - 1)) * 860},${168 - ((v - mn) / range) * 130}`)
       .join(' L')
