@@ -668,6 +668,13 @@ class SymbolEngine:
         if account is None or tick is None:
             self.state["error"] = "Account or tick unavailable"
             return
+        tick_ms = int(getattr(tick, "time_msc", 0) or 0)
+        max_tick_age = max(500, int(os.getenv("MAX_LIVE_TICK_AGE_MS", "5000")))
+        if tick_ms and int(time.time() * 1000) - tick_ms > max_tick_age:
+            self.state["status"] = "stale_tick"
+            self.state["error"] = f"Broker tick is stale (> {max_tick_age} ms)"
+            self._log({"type": "blocked", "reason": self.state["error"], "bar": bar})
+            return
 
         price = normalize_price(tick.ask if side == 1 else tick.bid, spec)
         av = ind["av"]
