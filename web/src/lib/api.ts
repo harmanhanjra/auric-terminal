@@ -16,6 +16,9 @@ import type {
   KronosForecast,
   KronosDataset,
   RiskPreview,
+  LoginResult,
+  ProductionStatus,
+  ReadinessStatus,
 } from './types'
 
 export class ApiError extends Error {
@@ -28,6 +31,7 @@ export class ApiError extends Error {
 }
 
 export const LIVE_KEY_STORAGE = 'auric.liveKey'
+export const SESSION_STORAGE = 'auric.session.v1'
 
 export function getLiveKey(): string {
   try {
@@ -46,10 +50,29 @@ export function setLiveKey(key: string): void {
   }
 }
 
+export function getSessionToken(): string {
+  try {
+    return sessionStorage.getItem(SESSION_STORAGE) || ''
+  } catch {
+    return ''
+  }
+}
+
+export function setSessionToken(token: string): void {
+  try {
+    if (token) sessionStorage.setItem(SESSION_STORAGE, token)
+    else sessionStorage.removeItem(SESSION_STORAGE)
+  } catch {
+    /* ignore */
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   const liveKey = getLiveKey()
-  // Server fail-closes live mutations without a matching X-Auric-Key.
+  const session = getSessionToken()
+  // Operator identity and live-execution authorization are intentionally separate.
+  if (session) headers.Authorization = `Bearer ${session}`
   if (liveKey) headers['X-Auric-Key'] = liveKey
   const res = await fetch(path, {
     ...init,
@@ -76,6 +99,12 @@ export interface SymbolSummary {
 
 export const api = {
   health: () => request<Health>('/api/health'),
+  login: (username: string, password: string) =>
+    request<LoginResult>('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
+  me: () => request<{ authenticated: boolean; claims?: Record<string, unknown> }>('/api/auth/me'),
+  readiness: () => request<ReadinessStatus>('/api/readiness'),
+  productionStatus: () => request<ProductionStatus>('/api/production/status'),
+  reconciliation: () => request<ProductionStatus['reconciliation']>('/api/reconciliation'),
   quote: () => request<Quote>('/api/quote'),
   strategies: () => request<StrategiesResponse>('/api/strategies'),
   account: () => request<Account>('/api/account'),
