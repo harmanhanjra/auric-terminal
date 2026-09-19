@@ -196,6 +196,33 @@ class ExecutionLedger:
         ).fetchone()
         return dict(row) if row else None
 
+    def recent(self, limit: int = 500, mode: str | None = None) -> list[dict]:
+        if mode:
+            rows = self.db.execute(
+                "SELECT * FROM execution_ledger WHERE mode=? ORDER BY ts DESC LIMIT ?",
+                (mode, max(1, min(limit, 5000))),
+            ).fetchall()
+        else:
+            rows = self.db.execute(
+                "SELECT * FROM execution_ledger ORDER BY ts DESC LIMIT ?",
+                (max(1, min(limit, 5000)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def broker_tickets(self, mode: str = "live", limit: int = 5000) -> set[int]:
+        rows = self.db.execute(
+            "SELECT broker_ticket FROM execution_ledger "
+            "WHERE mode=? AND broker_ticket IS NOT NULL ORDER BY ts DESC LIMIT ?",
+            (mode, max(1, min(limit, 10000))),
+        ).fetchall()
+        out: set[int] = set()
+        for row in rows:
+            try:
+                out.add(int(row["broker_ticket"]))
+            except (TypeError, ValueError):
+                continue
+        return out
+
 
 class PaperBroker:
     """Small deterministic paper broker with market/pending orders and SL/TP."""
