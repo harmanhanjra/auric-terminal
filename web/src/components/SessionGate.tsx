@@ -4,6 +4,9 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { LockKeyhole, ShieldCheck } from 'lucide-react'
 import { api, getSessionToken, setSessionToken } from '../lib/api'
 import App from '../App'
+import { AuricBackdrop } from './effects/AuricBackdrop'
+import { Button } from './ui/button'
+import { Surface } from './ui/surface'
 
 export function SessionGate() {
   const qc = useQueryClient()
@@ -48,10 +51,11 @@ export function SessionGate() {
   }
 
   return (
-    <main className="terminal-grid flex min-h-screen items-center justify-center bg-ink-950 px-4 text-fg-200">
-      <section className="w-full max-w-md rounded-2xl border border-ink-700 bg-ink-900/95 p-6 shadow-2xl">
+    <main className="auric-shell relative flex min-h-screen items-center justify-center overflow-hidden bg-ink-950 px-4 text-fg-200">
+      <AuricBackdrop />
+      <Surface elevated className="relative z-10 w-full max-w-md p-6">
         <div className="mb-6 flex items-center gap-3">
-          <div className="grid h-11 w-11 place-items-center rounded-xl border border-gold-600/40 bg-gold-600/10">
+          <div className="grid h-11 w-11 place-items-center rounded-xl border border-gold-400/25 bg-gold-400/[0.08] shadow-[0_0_28px_rgba(201,162,39,.08)]">
             <ShieldCheck className="h-5 w-5 text-gold-300" />
           </div>
           <div>
@@ -69,12 +73,12 @@ export function SessionGate() {
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               autoComplete="username"
-              className="h-10 w-full rounded-lg border border-ink-700 bg-ink-950 px-3 text-sm text-fg-100 outline-none focus:border-gold-600/70"
+              className="h-10 w-full rounded-lg border border-white/[0.07] bg-black/20 px-3 text-sm text-fg-100 outline-none transition-colors placeholder:text-fg-600 focus:border-gold-400/35 focus:bg-black/30"
             />
           </label>
           <label className="block">
             <span className="mb-1 block text-[9px] font-bold uppercase tracking-[0.12em] text-fg-500">Password</span>
-            <div className="flex h-10 items-center gap-2 rounded-lg border border-ink-700 bg-ink-950 px-3 focus-within:border-gold-600/70">
+            <div className="flex h-10 items-center gap-2 rounded-lg border border-white/[0.07] bg-black/20 px-3 transition-colors focus-within:border-gold-400/35 focus-within:bg-black/30">
               <LockKeyhole className="h-4 w-4 text-fg-600" />
               <input
                 type="password"
@@ -92,28 +96,30 @@ export function SessionGate() {
             </div>
           ) : null}
 
-          <button
+          <Button
             type="submit"
+            variant="premium"
             disabled={submitting || !username || !password}
-            className="mt-2 h-10 w-full rounded-lg border border-gold-600/40 bg-gold-600/15 text-[10px] font-black uppercase tracking-[0.12em] text-gold-300 hover:bg-gold-600/20 disabled:opacity-40"
+            className="mt-2 h-10 w-full text-[10px] font-black uppercase tracking-[0.12em]"
           >
             {submitting ? 'Authenticating…' : 'Enter Terminal'}
-          </button>
+          </Button>
         </form>
 
         <p className="mt-4 text-[9px] leading-relaxed text-fg-600">
           Session credentials are kept in sessionStorage and cleared when the browser session ends.
           Live execution still requires the separate execution key.
         </p>
-      </section>
+      </Surface>
     </main>
   )
 }
 
 function BootScreen({ label, detail }: { label: string; detail?: string }) {
   return (
-    <main className="terminal-grid flex min-h-screen items-center justify-center bg-ink-950 text-fg-300">
-      <div className="text-center">
+    <main className="auric-shell relative flex min-h-screen items-center justify-center overflow-hidden bg-ink-950 text-fg-300">
+      <AuricBackdrop />
+      <div className="relative z-10 text-center">
         <div className="mx-auto mb-3 h-7 w-7 animate-spin rounded-full border-2 border-ink-700 border-t-gold-400" />
         <div className="text-sm font-semibold">{label}</div>
         {detail ? <div className="mt-1 text-[10px] text-fg-600">{detail}</div> : null}
