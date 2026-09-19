@@ -385,9 +385,14 @@ def test_v3_auth_enforcement(client):
     old_keys = server.control._keys
     try:
         server.control.auth_required = True
+        import hashlib
         server.control._keys = {
-            "viewer-test": Principal(name="viewer", role="viewer", authenticated=True),
-            "admin-test": Principal(name="admin", role="admin", authenticated=True),
+            hashlib.sha256(b"viewer-test").hexdigest(): Principal(
+                name="viewer", role="viewer", authenticated=True
+            ),
+            hashlib.sha256(b"admin-test").hexdigest(): Principal(
+                name="admin", role="admin", authenticated=True
+            ),
         }
 
         assert client.get("/api/account").status_code == 401
