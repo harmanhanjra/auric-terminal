@@ -29,11 +29,13 @@ def make_candles(n=520):
 def client(tmp_path_factory):
     import server
     from execution_v2 import ExecutionLedger, PaperBroker
+    from production_control import ProductionControlPlane
     tmp = tmp_path_factory.mktemp("db")
     db = str(tmp / "test.db")
     server.journal = server.Journal(db)
     server.execution_ledger = ExecutionLedger(db)
     server.paper_broker = PaperBroker()
+    server.control = ProductionControlPlane(db)
     with TestClient(server.app) as c:
         yield c
 
@@ -214,6 +216,7 @@ def test_kill_paper(client):
     assert r.status_code == 200
     assert r.json()["halted"] is True
     client.post("/api/risk/reset")
+    client.post("/api/system/resume")
 
 
 def test_account_unavailable(client):
@@ -308,3 +311,92 @@ def test_global_paper_kill_flattens_all(client, monkeypatch):
     assert killed["closed"] >= 2
     assert client.get("/api/positions?mode=paper").json()["positions"] == []
     client.post("/api/risk/reset")
+
+
+
+def test_v3_readiness_and_system_status(client):
+    ready = client.get("/api/readiness")
+    assert ready.status_code == 200
+    assert "checks" in ready.json()
+    assert ready.json()["production"]["executionStage"] in {"shadow", "paper", "assisted", "auto"}
+
+    status = client.get("/api/system/status")
+    assert status.status_code == 200
+    body = status.json()
+    assert body["version"] == "3.0.0"
+    assert "riskPolicy" in body
+    assert "circuit" in body
+
+
+def test_v3_stage_promotion_local_admin(client):
+    r = client.post("/api/system/stage", json={"stage": "shadow"})
+    assert r.status_code == 200
+    assert r.json()["executionStage"] == "shadow"
+    r = client.post("/api/system/stage", json={"stage": "paper"})
+    assert r.status_code == 200
+    assert r.json()["executionStage"] == "paper"
+
+
+def test_v3_paper_position_management(client, monkeypatch):
+    import server
+    server.control.resume()
+    server.risk.halted = False
+    monkeypatch.setattr(server, "latest_by_symbol", {
+        "XAUUSD": {"symbol": "XAUUSD", "bid": 5000.0, "ask": 5000.18,
+                   "spread": 0.18, "source": "test", "timestamp": 1}
+    })
+    placed = client.post("/api/orders", json={
+        "symbol": "XAUUSD", "side": "buy", "lots": 0.10, "order_type": "market",
+        "stop_loss": 4990, "take_profit": 5020,
+        "mode": "paper", "client_order_id": "manage-paper-v3",
+    })
+    assert placed.status_code == 200
+    ticket = placed.json()["ticket"]
+
+    protected = client.post(
+        f"/api/positions/{ticket}/protect",
+        json={"mode": "paper", "breakeven": True},
+    )
+    assert protected.status_code == 200
+    assert protected.json()["position"]["sl"] == pytest.approx(protected.json()["position"]["entry"])
+
+    half = client.post(
+        f"/api/positions/{ticket}/close",
+        json={"mode": "paper", "lots": 0.05},
+    )
+    assert half.status_code == 200
+    remaining = client.get("/api/positions?mode=paper").json()["positions"]
+    row = next(p for p in remaining if p["ticket"] == ticket)
+    assert row["lots"] == pytest.approx(0.05)
+
+    closed = client.post(
+        f"/api/positions/{ticket}/close",
+        json={"mode": "paper"},
+    )
+    assert closed.status_code == 200
+    assert all(p["ticket"] != ticket for p in client.get("/api/positions?mode=paper").json()["positions"])
+
+
+def test_v3_auth_enforcement(client):
+    import server
+    from production_control import Principal
+
+    old_required = server.control.auth_required
+    old_keys = server.control._keys
+    try:
+        server.control.auth_required = True
+        server.control._keys = {
+            "viewer-test": Principal(name="viewer", role="viewer", authenticated=True),
+            "admin-test": Principal(name="admin", role="admin", authenticated=True),
+        }
+
+        assert client.get("/api/account").status_code == 401
+        viewer_headers = {"X-Auric-Auth": "viewer-test"}
+        assert client.get("/api/account", headers=viewer_headers).status_code == 200
+        assert client.post("/api/system/stage", json={"stage": "paper"}, headers=viewer_headers).status_code == 403
+
+        admin_headers = {"X-Auric-Auth": "admin-test"}
+        assert client.post("/api/system/stage", json={"stage": "paper"}, headers=admin_headers).status_code == 200
+    finally:
+        server.control.auth_required = old_required
+        server.control._keys = old_keys
