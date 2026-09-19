@@ -12,13 +12,13 @@ export function Panel({ label, right, children, className, ...props }: PanelProp
   return (
     <section
       className={clsx(
-        'flex min-h-0 flex-col rounded-lg border border-ink-700/70 bg-ink-900',
+        'auric-surface flex min-h-0 flex-col rounded-xl',
         className,
       )}
       {...props}
     >
       {(label || right) && (
-        <header className="flex h-9 shrink-0 items-center justify-between border-b border-ink-700/70 px-3">
+        <header className="flex h-9 shrink-0 items-center justify-between border-b border-white/[0.055] px-3">
           <h2 className="text-[10px] font-bold uppercase tracking-[0.12em] text-fg-400">
             {label}
           </h2>
