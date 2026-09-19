@@ -1424,6 +1424,156 @@ async def pending_orders(symbol: str | None = None, mode: Literal["paper", "live
     return {"orders": out}
 
 
+@app.post("/api/positions/{ticket}/close")
+async def close_position(ticket: int, req: ClosePositionRequest, request: Request):
+    _require_role(request, "trader")
+    if req.mode == "paper":
+        try:
+            result = paper_broker.close_position(ticket, req.lots)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        journal.add(
+            mode="paper", symbol=result["symbol"], side="system",
+            lots=result["closedLots"], entry=result["entry"], exit=result["exit"],
+            pnl=result["pnl"], strategy="manual", reason="Paper manual close",
+            raw={"ticket": ticket},
+        )
+        return {"ok": True, "mode": "paper", "position": result}
+
+    if not LIVE_ENABLED:
+        raise HTTPException(403, "Manual live execution is disabled")
+    _require_live_auth(request)
+    allowed, reason = control.trade_gate("ALL", "live", autonomous=False)
+    if not allowed:
+        raise HTTPException(403, reason)
+    if not mt5_ready or not mt5:
+        raise HTTPException(503, "MT5 terminal is not connected")
+
+    rows = list(await asyncio.to_thread(mt5.positions_get) or [])
+    position = next((p for p in rows if int(p.ticket) == ticket and p.magic == MAGIC), None)
+    if position is None:
+        raise HTTPException(404, "Auric live position not found")
+    info = await asyncio.to_thread(mt5.symbol_info, position.symbol)
+    tick = await asyncio.to_thread(mt5.symbol_info_tick, position.symbol)
+    if info is None or tick is None:
+        raise HTTPException(503, "Broker symbol/tick unavailable")
+    spec = spec_from_info(position.symbol, info)
+    raw_lots = float(position.volume if req.lots is None else req.lots)
+    if raw_lots <= 0 or raw_lots > float(position.volume):
+        raise HTTPException(422, "Invalid close volume")
+    lots = normalize_volume(raw_lots, spec)
+    is_buy = position.type == mt5.POSITION_TYPE_BUY
+    close_request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": position.symbol,
+        "position": position.ticket,
+        "volume": lots,
+        "type": mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
+        "price": normalize_price(tick.bid if is_buy else tick.ask, spec),
+        "deviation": 30,
+        "magic": MAGIC,
+        "comment": "AuricV3 close",
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": choose_filling(mt5, spec),
+    }
+    check = await asyncio.to_thread(mt5.order_check, close_request)
+    valid = {0, getattr(mt5, "TRADE_RETCODE_DONE", 10009)}
+    if check is not None and getattr(check, "retcode", 0) not in valid:
+        raise HTTPException(422, f"MT5 preflight rejected close: {getattr(check, 'comment', 'unknown')}")
+    result = await asyncio.to_thread(mt5.order_send, close_request)
+    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+        raise HTTPException(502, f"MT5 rejected close: {getattr(result, 'comment', 'unknown')}")
+    journal.add(
+        mode="live", symbol=position.symbol, side="system", lots=lots,
+        entry=position.price_open, exit=getattr(result, "price", close_request["price"]),
+        pnl=None, strategy="manual", reason="Live manual close",
+        raw={"ticket": ticket},
+    )
+    return {"ok": True, "mode": "live", "ticket": ticket, "closedLots": lots, "deal": getattr(result, "deal", None)}
+
+
+@app.post("/api/positions/{ticket}/protect")
+async def protect_position(ticket: int, req: ProtectPositionRequest, request: Request):
+    _require_role(request, "trader")
+    if not req.breakeven and req.sl is None and req.tp is None:
+        raise HTTPException(422, "Provide sl, tp or breakeven=true")
+    if req.mode == "paper":
+        try:
+            position = paper_broker.protect_position(
+                ticket, sl=req.sl, tp=req.tp, breakeven=req.breakeven
+            )
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return {"ok": True, "mode": "paper", "position": position}
+
+    if not LIVE_ENABLED:
+        raise HTTPException(403, "Manual live execution is disabled")
+    _require_live_auth(request)
+    if not mt5_ready or not mt5:
+        raise HTTPException(503, "MT5 terminal is not connected")
+    rows = list(await asyncio.to_thread(mt5.positions_get) or [])
+    position = next((p for p in rows if int(p.ticket) == ticket and p.magic == MAGIC), None)
+    if position is None:
+        raise HTTPException(404, "Auric live position not found")
+    info = await asyncio.to_thread(mt5.symbol_info, position.symbol)
+    if info is None:
+        raise HTTPException(503, "Broker symbol unavailable")
+    spec = spec_from_info(position.symbol, info)
+    sl = float(position.price_open) if req.breakeven else (req.sl if req.sl is not None else float(position.sl or 0.0))
+    tp = req.tp if req.tp is not None else float(position.tp or 0.0)
+    modify_request = {
+        "action": mt5.TRADE_ACTION_SLTP,
+        "symbol": position.symbol,
+        "position": position.ticket,
+        "sl": normalize_price(sl, spec) if sl else 0.0,
+        "tp": normalize_price(tp, spec) if tp else 0.0,
+        "magic": MAGIC,
+        "comment": "AuricV3 protect",
+    }
+    result = await asyncio.to_thread(mt5.order_send, modify_request)
+    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+        raise HTTPException(502, f"MT5 rejected protection update: {getattr(result, 'comment', 'unknown')}")
+    return {
+        "ok": True, "mode": "live", "ticket": ticket,
+        "sl": modify_request["sl"], "tp": modify_request["tp"],
+    }
+
+
+@app.delete("/api/pending/{ticket}")
+async def cancel_pending(ticket: int, request: Request, mode: Literal["paper", "live"] = "paper"):
+    _require_role(request, "trader")
+    if mode == "paper":
+        try:
+            order = paper_broker.cancel_pending(ticket)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return {"ok": True, "mode": "paper", "order": order}
+
+    if not LIVE_ENABLED:
+        raise HTTPException(403, "Manual live execution is disabled")
+    _require_live_auth(request)
+    if not mt5_ready or not mt5:
+        raise HTTPException(503, "MT5 terminal is not connected")
+    rows = list(await asyncio.to_thread(mt5.orders_get) or [])
+    pending = next((p for p in rows if int(p.ticket) == ticket and p.magic == MAGIC), None)
+    if pending is None:
+        raise HTTPException(404, "Auric live pending order not found")
+    result = await asyncio.to_thread(
+        mt5.order_send, {"action": mt5.TRADE_ACTION_REMOVE, "order": pending.ticket}
+    )
+    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+        raise HTTPException(502, f"MT5 rejected cancellation: {getattr(result, 'comment', 'unknown')}")
+    return {"ok": True, "mode": "live", "ticket": ticket}
+
+
+@app.get("/api/risk/policy")
+async def risk_policy(request: Request):
+    _require_role(request, "viewer")
+    return control.risk_policy()
+
+
 @app.post("/api/risk/reset")
 async def reset_risk(request: Request):
     _require_role(request, "admin")
