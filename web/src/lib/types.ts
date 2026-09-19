@@ -13,6 +13,7 @@ export interface Health {
   ok: boolean
   source: string
   liveTrading: boolean
+  autoLiveTrading?: boolean
   symbol: string
   timestamp: number
 }
