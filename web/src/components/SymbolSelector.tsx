@@ -36,18 +36,18 @@ export function SymbolSelector({ active, onChange }: SymbolSelectorProps) {
   }
 
   return (
-    <div className="flex h-full items-center gap-1 border-r border-ink-700 px-2">
+    <div className="flex h-full items-center gap-1 border-r border-white/[0.055] px-2">
       <button
         type="button"
         aria-label="Previous symbol"
         onClick={() => go(-1)}
-        className="grid h-7 w-6 place-items-center rounded text-fg-500 hover:bg-ink-800 hover:text-fg-200"
+        className="grid h-7 w-6 place-items-center rounded-lg text-fg-600 hover:bg-white/[0.04] hover:text-fg-200"
       >
         <ChevronLeft className="h-3.5 w-3.5" />
       </button>
       <div
         ref={scrollerRef}
-        className="flex h-7 max-w-[420px] items-center gap-1 overflow-x-auto rounded-md border border-ink-700 bg-ink-800/60 px-1 scrollbar-hidden"
+        className="flex h-8 max-w-[420px] items-center gap-1 overflow-x-auto rounded-lg border border-white/[0.06] bg-black/16 px-1 scrollbar-hidden"
       >
         {list.map((sym) => (
           <button
@@ -56,10 +56,10 @@ export function SymbolSelector({ active, onChange }: SymbolSelectorProps) {
             type="button"
             onClick={() => onChange(sym)}
             className={clsx(
-              'whitespace-nowrap rounded px-2 py-0.5 text-[10px] font-bold tracking-[0.04em] transition-colors',
+              'whitespace-nowrap rounded-md px-2 py-1 text-[9px] font-bold tracking-[0.04em] transition-colors',
               sym === active
-                ? 'bg-gold-600/20 text-gold-300 ring-1 ring-gold-600/30'
-                : 'text-fg-400 hover:bg-ink-700 hover:text-fg-200',
+                ? 'bg-gold-400/[0.08] text-gold-300 shadow-[inset_0_0_0_1px_rgba(222,190,90,.12)]'
+                : 'text-fg-500 hover:bg-white/[0.04] hover:text-fg-200',
             )}
             title={`Switch header to ${sym}`}
           >
@@ -71,7 +71,7 @@ export function SymbolSelector({ active, onChange }: SymbolSelectorProps) {
         type="button"
         aria-label="Next symbol"
         onClick={() => go(1)}
-        className="grid h-7 w-6 place-items-center rounded text-fg-500 hover:bg-ink-800 hover:text-fg-200"
+        className="grid h-7 w-6 place-items-center rounded-lg text-fg-600 hover:bg-white/[0.04] hover:text-fg-200"
       >
         <ChevronRight className="h-3.5 w-3.5" />
       </button>
