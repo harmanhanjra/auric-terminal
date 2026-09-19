@@ -1487,8 +1487,22 @@ async def pending_orders(symbol: str | None = None, mode: Literal["paper", "live
         for p in rows:
             if getattr(p, "magic", None) != MAGIC or (sym and p.symbol != sym):
                 continue
+            buy_types = {
+                getattr(mt5, "ORDER_TYPE_BUY_LIMIT", -1),
+                getattr(mt5, "ORDER_TYPE_BUY_STOP", -2),
+                getattr(mt5, "ORDER_TYPE_BUY_STOP_LIMIT", -3),
+            }
+            stop_types = {
+                getattr(mt5, "ORDER_TYPE_BUY_STOP", -2),
+                getattr(mt5, "ORDER_TYPE_SELL_STOP", -4),
+                getattr(mt5, "ORDER_TYPE_BUY_STOP_LIMIT", -3),
+                getattr(mt5, "ORDER_TYPE_SELL_STOP_LIMIT", -5),
+            }
             out.append({
-                "ticket": p.ticket, "symbol": p.symbol, "lots": p.volume_current,
+                "ticket": p.ticket, "symbol": p.symbol,
+                "side": "buy" if p.type in buy_types else "sell",
+                "orderType": "stop" if p.type in stop_types else "limit",
+                "lots": p.volume_current,
                 "entry": p.price_open, "sl": p.sl, "tp": p.tp, "mode": "live",
             })
     return {"orders": out}
