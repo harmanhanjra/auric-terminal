@@ -196,6 +196,15 @@ class ExecutionLedger:
         ).fetchone()
         return dict(row) if row else None
 
+    def recent_live_tickets(self, limit: int = 200) -> list[str]:
+        rows = self.db.execute(
+            "SELECT broker_ticket FROM execution_ledger "
+            "WHERE mode='live' AND broker_ticket IS NOT NULL "
+            "ORDER BY ts DESC LIMIT ?",
+            (max(1, min(limit, 1000)),),
+        ).fetchall()
+        return [str(row["broker_ticket"]) for row in rows if row["broker_ticket"]]
+
 
 class PaperBroker:
     """Small deterministic paper broker with market/pending orders and SL/TP."""
