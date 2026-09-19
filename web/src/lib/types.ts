@@ -52,11 +52,11 @@ export interface ProductionStatus {
     status: string
     summary: Record<string, unknown>
   } | null
-  version: string
-  mt5Connected: boolean
-  manualLiveEnabled: boolean
-  autoLiveEnabled: boolean
-  trackedSymbols: string[]
+  version?: string
+  mt5Connected?: boolean
+  manualLiveEnabled?: boolean
+  autoLiveEnabled?: boolean
+  trackedSymbols?: string[]
 }
 
 export interface Readiness {
