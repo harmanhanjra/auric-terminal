@@ -43,7 +43,14 @@ class ProductionControlPlane:
         self.news_min_impact = os.getenv("NEWS_GUARD_MIN_IMPACT", "high").lower()
         self.read_rpm = int(os.getenv("AURIC_READ_RPM", "240"))
         self.write_rpm = int(os.getenv("AURIC_WRITE_RPM", "60"))
-        self._keys = self._parse_keys(os.getenv("AURIC_API_KEYS_JSON", ""))
+        keys_raw = os.getenv("AURIC_API_KEYS_JSON", "")
+        keys_file = os.getenv("AURIC_API_KEYS_JSON_FILE", "").strip()
+        if keys_file:
+            try:
+                keys_raw = open(keys_file, "r", encoding="utf-8").read().strip()
+            except OSError as exc:
+                raise RuntimeError("Unable to read AURIC_API_KEYS_JSON_FILE") from exc
+        self._keys = self._parse_keys(keys_raw)
 
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA busy_timeout=5000")
