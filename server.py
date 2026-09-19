@@ -137,7 +137,7 @@ def _require_role(request: Request, minimum_role: str) -> Principal:
 
 journal = Journal(str(DB_PATH))
 execution_ledger = ExecutionLedger(str(DB_PATH))
-paper_broker = PaperBroker()
+paper_broker = PaperBroker(str(DB_PATH))
 control = ProductionControlPlane(str(DB_PATH))
 
 MAGIC = 144021
