@@ -1,6 +1,6 @@
 import { X } from 'lucide-react'
 import { useEffect, type ReactNode } from 'react'
-import { Button } from './ui/button'
+import { Button } from './ui/Button'
 
 interface ModalProps {
   id: string
