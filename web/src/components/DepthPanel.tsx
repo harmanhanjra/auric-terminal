@@ -21,7 +21,7 @@ export function DepthPanel({ quote }: { quote: Quote }) {
   const max = 13
 
   return (
-    <section className="border-b border-ink-700/70 bg-ink-900/45 p-3">
+    <section className="border-b border-white/[0.055] bg-ink-900/42 p-3">
       <div className="mb-2 flex items-center justify-between">
         <div>
           <div className="text-[9px] font-extrabold uppercase tracking-[0.12em] text-fg-400">Indicative Liquidity Ladder</div>
@@ -29,7 +29,7 @@ export function DepthPanel({ quote }: { quote: Quote }) {
             <Info className="h-2.5 w-2.5" /> Generated from spread · not broker L2
           </div>
         </div>
-        <span className="rounded border border-ink-700 bg-ink-800 px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-[0.1em] text-fg-500">
+        <span className="rounded-md border border-white/[0.06] bg-white/[0.025] px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-[0.1em] text-fg-500">
           SYNTHETIC
         </span>
       </div>
@@ -38,7 +38,7 @@ export function DepthPanel({ quote }: { quote: Quote }) {
         {ladder.asks.slice().reverse().map((a, i) => (
           <Level key={`a-${i}`} price={a.price} weight={a.weight} max={max} ask />
         ))}
-        <div className="my-1 flex items-center justify-between border-y border-ink-700/70 bg-ink-950/70 px-2 py-1">
+        <div className="my-1 flex items-center justify-between border-y border-white/[0.055] bg-black/20 px-2 py-1.5">
           <span className="text-[8px] font-bold uppercase tracking-[0.1em] text-fg-600">Spread</span>
           <span className="tnum text-[9px] font-bold text-gold-300">{fmtPrice(quote.spread)}</span>
         </div>
@@ -52,7 +52,7 @@ export function DepthPanel({ quote }: { quote: Quote }) {
 
 function Level({ price, weight, max, ask }: { price: number; weight: number; max: number; ask: boolean }) {
   return (
-    <div className="relative flex h-5 items-center justify-between overflow-hidden rounded-sm px-2">
+    <div className="relative flex h-5 items-center justify-between overflow-hidden rounded-md px-2">
       <div
         className={`absolute inset-y-0 right-0 ${ask ? 'bg-bear-500/8' : 'bg-bull-500/8'}`}
         style={{ width: `${Math.min(100, weight / max * 100)}%` }}
