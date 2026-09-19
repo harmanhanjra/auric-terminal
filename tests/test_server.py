@@ -28,8 +28,12 @@ def make_candles(n=520):
 @pytest.fixture(scope="module")
 def client(tmp_path_factory):
     import server
+    from execution_v2 import ExecutionLedger, PaperBroker
     tmp = tmp_path_factory.mktemp("db")
-    server.journal = server.Journal(str(tmp / "test.db"))
+    db = str(tmp / "test.db")
+    server.journal = server.Journal(db)
+    server.execution_ledger = ExecutionLedger(db)
+    server.paper_broker = PaperBroker()
     with TestClient(server.app) as c:
         yield c
 
@@ -51,6 +55,7 @@ def test_health(client):
     body = r.json()
     assert body["ok"] is True
     assert body["liveTrading"] is False
+    assert body["autoLiveTrading"] is False
 
 
 def test_security_headers(client):
@@ -152,6 +157,8 @@ def test_order_paper(client, monkeypatch):
     body = r.json()
     assert body["accepted"] is True
     assert body["mode"] == "paper"
+    positions = client.get("/api/positions?mode=paper").json()["positions"]
+    assert any(p["symbol"] == "XAUUSD" and p["mode"] == "paper" for p in positions)
 
 
 def test_order_live_disabled(client):
@@ -163,7 +170,9 @@ def test_order_live_disabled(client):
 
 def test_live_order_requires_execution_key(client, monkeypatch):
     import server
+    from production_core import ExecutionPolicy
     monkeypatch.setattr(server, "LIVE_ENABLED", True)
+    monkeypatch.setattr(server, "execution_policy", ExecutionPolicy("assisted"))
     monkeypatch.setattr(server, "LIVE_API_KEY", "test-secret-key")
     r = client.post("/api/orders", json={
         "side": "sell", "lots": 0.2, "stop_loss": None, "take_profit": None,
@@ -173,7 +182,9 @@ def test_live_order_requires_execution_key(client, monkeypatch):
 
 def test_live_execution_fails_closed_without_configured_key(client, monkeypatch):
     import server
+    from production_core import ExecutionPolicy
     monkeypatch.setattr(server, "LIVE_ENABLED", True)
+    monkeypatch.setattr(server, "execution_policy", ExecutionPolicy("assisted"))
     monkeypatch.setattr(server, "LIVE_API_KEY", "")
     r = client.post("/api/orders", json={
         "side": "sell", "lots": 0.2, "stop_loss": None, "take_profit": None,
@@ -216,11 +227,11 @@ def test_account_unavailable(client):
 
 
 def test_candles_always_available(client):
-    # MT5 offline + no Yahoo creds -> deterministic Demo series (honestly labelled)
+    # MT5 is offline in CI. Yahoo may be reachable; otherwise the honest Demo fallback is used.
     r = client.get("/api/candles?interval=M15")
     assert r.status_code == 200
     body = r.json()
-    assert body["source"] == "Demo"
+    assert body["source"] in {"Yahoo", "Demo"}
     assert len(body["values"]) >= 10
     assert all({"open", "high", "low", "close"} <= set(v) for v in body["values"])
 
@@ -238,3 +249,118 @@ def test_engine_endpoint(client):
     for key in ("running", "enabled", "strategy", "timeframe", "status",
                 "trades", "config", "risk"):
         assert key in body
+
+
+
+def test_risk_preview_symbol_aware(client):
+    r = client.post("/api/risk/preview", json={
+        "symbol": "XAUUSD", "side": "buy",
+        "entry": 5000, "stop": 4990, "target": 5020,
+        "risk_amount": 50, "risk_pct": 1,
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["lots"] == pytest.approx(0.05)
+    assert body["riskUsd"] == pytest.approx(50, abs=0.01)
+    assert body["rr"] == pytest.approx(2.0)
+
+
+def test_pending_order_requires_entry(client):
+    r = client.post("/api/orders", json={
+        "side": "buy", "lots": 0.05, "order_type": "limit",
+        "stop_loss": 4990, "take_profit": 5030,
+        "mode": "paper", "client_order_id": "pending-no-entry",
+    })
+    assert r.status_code == 422
+
+
+def test_durable_duplicate_order_id_rejected(client, monkeypatch):
+    import server
+    server.risk.halted = False
+    monkeypatch.setattr(server, "latest_by_symbol", {
+        "XAUUSD": {"symbol": "XAUUSD", "bid": 5000.0, "ask": 5000.18,
+                   "spread": 0.18, "source": "test", "timestamp": 1}
+    })
+    payload = {
+        "side": "buy", "lots": 0.01, "order_type": "market",
+        "stop_loss": 4990, "take_profit": 5020,
+        "mode": "paper", "client_order_id": "duplicate-v2-0001",
+    }
+    assert client.post("/api/orders", json=payload).status_code == 200
+    r = client.post("/api/orders", json=payload)
+    assert r.status_code == 409
+
+
+def test_global_paper_kill_flattens_all(client, monkeypatch):
+    import server
+    server.risk.halted = False
+    monkeypatch.setattr(server, "latest_by_symbol", {
+        "XAUUSD": {"symbol": "XAUUSD", "bid": 5000.0, "ask": 5000.18,
+                   "spread": 0.18, "source": "test", "timestamp": 1},
+        "EURUSD": {"symbol": "EURUSD", "bid": 1.0850, "ask": 1.0851,
+                   "spread": 0.0001, "source": "test", "timestamp": 1},
+    })
+    for symbol, client_id in [("XAUUSD", "kill-xau-v2"), ("EURUSD", "kill-eur-v2")]:
+        r = client.post("/api/orders", json={
+            "symbol": symbol, "side": "buy", "lots": 0.01, "order_type": "market",
+            "mode": "paper", "client_order_id": client_id,
+        })
+        assert r.status_code == 200
+    assert len(client.get("/api/positions?mode=paper").json()["positions"]) >= 2
+    killed = client.post("/api/kill?mode=paper").json()
+    assert killed["halted"] is True
+    assert killed["closed"] >= 2
+    assert client.get("/api/positions?mode=paper").json()["positions"] == []
+    client.post("/api/risk/reset")
+
+
+
+def test_operator_auth_middleware_roundtrip(client, monkeypatch):
+    import server
+    from production_core import OperatorAuth
+    monkeypatch.setenv("AURIC_REQUIRE_AUTH", "true")
+    monkeypatch.setenv("AURIC_AUTH_SECRET", "s" * 32)
+    monkeypatch.setenv("AURIC_OPERATOR_USERNAME", "operator")
+    monkeypatch.setenv("AURIC_OPERATOR_PASSWORD", "correct-horse-battery-staple")
+    monkeypatch.setattr(server, "operator_auth", OperatorAuth())
+
+    denied = client.get("/api/account")
+    assert denied.status_code == 401
+
+    login = client.post("/api/auth/login", json={
+        "username": "operator",
+        "password": "correct-horse-battery-staple",
+    })
+    assert login.status_code == 200
+    token = login.json()["token"]
+
+    allowed = client.get("/api/account", headers={"Authorization": f"Bearer {token}"})
+    assert allowed.status_code == 200
+
+
+def test_shadow_stage_blocks_manual_paper_orders(client, monkeypatch):
+    import server
+    from production_core import ExecutionPolicy
+    monkeypatch.setattr(server, "execution_policy", ExecutionPolicy("shadow"))
+    monkeypatch.setattr(server, "latest_by_symbol", {
+        "XAUUSD": {"symbol": "XAUUSD", "bid": 5000.0, "ask": 5000.18,
+                   "spread": 0.18, "source": "test", "timestamp": 1}
+    })
+    r = client.post("/api/orders", json={
+        "symbol": "XAUUSD",
+        "side": "buy",
+        "lots": 0.01,
+        "order_type": "market",
+        "mode": "paper",
+        "client_order_id": "shadow-block-v3",
+    })
+    assert r.status_code == 403
+
+
+def test_production_status_endpoint(client):
+    r = client.get("/api/production/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert "policy" in body
+    assert "reconciliation" in body
+    assert "limits" in body

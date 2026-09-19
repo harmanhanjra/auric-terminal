@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { clsx } from 'clsx'
-import { Minus, Plus, TrendingDown, TrendingUp } from 'lucide-react'
+import { Calculator, LockKeyhole, TrendingDown, TrendingUp } from 'lucide-react'
 import { api, getLiveKey, setLiveKey } from '../lib/api'
 import { fmtMoney, fmtPrice } from '../lib/format'
 import type { Quote } from '../lib/types'
@@ -11,48 +12,76 @@ interface OrderTicketProps {
   activeSymbol?: string
 }
 
-const OZ_PER_LOT = 100
+type OrderType = 'market' | 'limit' | 'stop'
+type SizingMode = 'risk' | 'lots'
+
+function decimalsFor(symbol: string) {
+  return symbol === 'EURUSD' ? 5 : 2
+}
+
+function roundFor(symbol: string, value: number) {
+  const d = decimalsFor(symbol)
+  const m = 10 ** d
+  return Math.round(value * m) / m
+}
 
 export function OrderTicket({ quote, live, activeSymbol = 'XAUUSD' }: OrderTicketProps) {
-  const [orderType, setOrderType] = useState<'market' | 'limit' | 'stop'>('market')
-  const [lots, setLots] = useState(0.2)
-  const [sl, setSl] = useState(4991.2)
-  const [tp, setTp] = useState(5046)
+  const [orderType, setOrderType] = useState<OrderType>('market')
+  const [sizingMode, setSizingMode] = useState<SizingMode>('risk')
+  const [manualLots, setManualLots] = useState(0.1)
+  const [riskUsd, setRiskUsd] = useState(50)
+  const [entryPrice, setEntryPrice] = useState(quote.price)
+  const [sl, setSl] = useState(quote.price * 0.996)
+  const [tp, setTp] = useState(quote.price * 1.008)
   const [status, setStatus] = useState<{ kind: 'success' | 'error'; msg: string } | null>(null)
   const [pending, setPending] = useState(false)
   const [liveKey, setLiveKeyState] = useState(() => getLiveKey())
 
-  // Re-anchor SL/TP around the live price whenever the symbol changes,
-  // so non-XAU symbols don't inherit gold's absolute levels.
   useEffect(() => {
-    const p = quote.price
-    if (p > 0) {
-      setSl((v) => (Math.abs(v - p) / p > 0.2 ? Math.round(p * 0.996 * 100) / 100 : v))
-      setTp((v) => (Math.abs(v - p) / p > 0.2 ? Math.round(p * 1.004 * 100) / 100 : v))
-    }
+    if (quote.price <= 0) return
+    setEntryPrice(roundFor(activeSymbol, quote.price))
+    setSl(roundFor(activeSymbol, quote.price * 0.996))
+    setTp(roundFor(activeSymbol, quote.price * 1.008))
+    setStatus(null)
+    // Re-anchor only when the instrument changes; live ticks must not overwrite
+    // a trader's edited entry/SL/TP.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSymbol])
 
-  const riskPct = useMemo(
-    () => (sl > 0 ? ((Math.abs(quote.price - sl) / quote.price) * 100).toFixed(2) : '—'),
-    [quote.price, sl],
-  )
-  const rewardPct = useMemo(
-    () => (tp > 0 ? ((Math.abs(tp - quote.price) / quote.price) * 100).toFixed(2) : '—'),
-    [quote.price, tp],
-  )
-  const rr = useMemo(() => {
-    const reward = Math.abs(tp - quote.price)
-    const risk = Math.abs(quote.price - sl)
-    return risk > 0 ? (reward / risk).toFixed(2) : '—'
-  }, [quote.price, sl, tp])
+  const effectiveEntry = orderType === 'market' ? quote.price : entryPrice
+  const previewEnabled =
+    effectiveEntry > 0 &&
+    sl > 0 &&
+    Math.abs(effectiveEntry - sl) > Number.EPSILON &&
+    riskUsd > 0
 
-  const margin = lots * OZ_PER_LOT * quote.price
-  const atStop = -(lots * OZ_PER_LOT * Math.abs(quote.price - sl))
-  const atTarget = lots * OZ_PER_LOT * Math.abs(tp - quote.price)
+  const { data: preview } = useQuery({
+    queryKey: ['risk-preview', activeSymbol, effectiveEntry, sl, tp, riskUsd],
+    queryFn: () =>
+      api.riskPreview({
+        symbol: activeSymbol,
+        side: 'buy',
+        entry: effectiveEntry,
+        stop: sl,
+        target: tp || null,
+        risk_amount: riskUsd,
+      }),
+    enabled: previewEnabled,
+    staleTime: 1200,
+    refetchInterval: 4000,
+    retry: false,
+  })
 
-  const adjustLots = (delta: number) =>
-    setLots((v) => Math.min(5, Math.max(0.1, Math.round((v + delta) * 100) / 100)))
+  const lots = sizingMode === 'risk' ? (preview?.lots ?? manualLots) : manualLots
+  const rr = preview?.rr ?? (() => {
+    const risk = Math.abs(effectiveEntry - sl)
+    return risk > 0 ? Math.abs(tp - effectiveEntry) / risk : 0
+  })()
+
+  const adjustLots = (delta: number) => {
+    setManualLots((v) => Math.max(0.01, Math.round((v + delta) * 100) / 100))
+    setSizingMode('lots')
+  }
 
   const submit = async (side: 'buy' | 'sell') => {
     setPending(true)
@@ -61,15 +90,19 @@ export function OrderTicket({ quote, live, activeSymbol = 'XAUUSD' }: OrderTicke
       const res = await api.order({
         side,
         lots,
-        stop_loss: orderType === 'market' ? sl : null,
-        take_profit: orderType === 'market' ? tp : null,
+        order_type: orderType,
+        entry_price: orderType === 'market' ? null : entryPrice,
+        stop_loss: sl || null,
+        take_profit: tp || null,
         mode: live ? 'live' : 'paper',
         symbol: activeSymbol,
-        client_order_id: `auric-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+        client_order_id: `auric-v2-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
       })
+      const state = res.status === 'pending' ? 'PENDING' : 'FILLED'
+      const px = res.fillPrice ?? res.entryPrice ?? entryPrice
       setStatus({
         kind: 'success',
-        msg: `${(live ? 'LIVE' : 'PAPER')} ${side.toUpperCase()} ${lots.toFixed(2)} @ ${fmtPrice(res.fillPrice)}`,
+        msg: `${live ? 'LIVE' : 'PAPER'} · ${state} · ${side.toUpperCase()} ${lots} @ ${fmtPrice(px)}`,
       })
     } catch (e) {
       setStatus({ kind: 'error', msg: e instanceof Error ? e.message : 'Order rejected' })
@@ -78,16 +111,43 @@ export function OrderTicket({ quote, live, activeSymbol = 'XAUUSD' }: OrderTicke
     }
   }
 
+  const riskLabel = sizingMode === 'risk' ? 'Risk-sized' : 'Manual lots'
+  const priceDeltaPct = useMemo(
+    () => (effectiveEntry > 0 ? Math.abs(effectiveEntry - sl) / effectiveEntry * 100 : 0),
+    [effectiveEntry, sl],
+  )
+
   return (
-    <div className="flex flex-col gap-3 border-b border-ink-700/70 p-3">
-      <div className="flex rounded-md border border-ink-700 bg-ink-800 p-0.5">
+    <section className="border-b border-ink-700/80 bg-ink-900/80 p-3">
+      <div className="mb-3 flex items-center justify-between">
+        <div>
+          <div className="text-[10px] font-extrabold uppercase tracking-[0.14em] text-fg-300">
+            Execution Ticket
+          </div>
+          <div className="mt-0.5 text-[9px] text-fg-500">
+            {activeSymbol} · {live ? 'manual live' : 'paper broker'} · algo arming is separate
+          </div>
+        </div>
+        <span className={clsx(
+          'rounded-md border px-2 py-1 text-[9px] font-extrabold uppercase tracking-[0.12em]',
+          live
+            ? 'border-bear-500/35 bg-bear-500/10 text-bear-400'
+            : 'border-gold-600/35 bg-gold-600/10 text-gold-300',
+        )}>
+          {live ? 'LIVE' : 'PAPER'}
+        </span>
+      </div>
+
+      <div className="mb-3 grid grid-cols-3 rounded-lg border border-ink-700 bg-ink-950/70 p-1">
         {(['market', 'limit', 'stop'] as const).map((t) => (
           <button
             key={t}
             onClick={() => setOrderType(t)}
             className={clsx(
-              'flex-1 rounded py-1 text-[10px] font-bold uppercase tracking-[0.1em] transition-colors',
-              orderType === t ? 'bg-ink-700 text-fg-100' : 'text-fg-500 hover:text-fg-300',
+              'rounded-md py-1.5 text-[9px] font-extrabold uppercase tracking-[0.12em] transition-colors',
+              orderType === t
+                ? 'bg-ink-700 text-fg-100 shadow-sm'
+                : 'text-fg-500 hover:bg-ink-800 hover:text-fg-300',
             )}
           >
             {t}
@@ -96,96 +156,122 @@ export function OrderTicket({ quote, live, activeSymbol = 'XAUUSD' }: OrderTicke
       </div>
 
       <div className="grid grid-cols-2 gap-2">
-        <Field label="Size · Lots">
-          <div className="flex items-center justify-between gap-1">
+        {orderType !== 'market' && (
+          <Field label="Entry price">
+            <Input value={entryPrice} onChange={(v) => setEntryPrice(Number(v))} />
+          </Field>
+        )}
+
+        <Field label="Sizing model">
+          <div className="grid h-8 grid-cols-2 rounded-md border border-ink-700 bg-ink-800 p-0.5">
             <button
-              onClick={() => adjustLots(-0.1)}
-              className="grid h-7 w-7 place-items-center rounded bg-ink-700 text-fg-200 hover:bg-ink-600"
-              aria-label="Decrease lots"
+              onClick={() => setSizingMode('risk')}
+              className={clsx('rounded text-[9px] font-bold', sizingMode === 'risk' ? 'bg-gold-600/20 text-gold-300' : 'text-fg-500')}
             >
-              <Minus className="h-3.5 w-3.5" />
+              Risk
             </button>
-            <span className="tnum text-[13px] font-semibold text-fg-100">{lots.toFixed(2)}</span>
             <button
-              onClick={() => adjustLots(0.1)}
-              className="grid h-7 w-7 place-items-center rounded bg-ink-700 text-fg-200 hover:bg-ink-600"
-              aria-label="Increase lots"
+              onClick={() => setSizingMode('lots')}
+              className={clsx('rounded text-[9px] font-bold', sizingMode === 'lots' ? 'bg-ink-700 text-fg-200' : 'text-fg-500')}
             >
-              <Plus className="h-3.5 w-3.5" />
+              Lots
             </button>
           </div>
         </Field>
-        <Field label="Risk · USD">
-          <Input value={250} prefix="$" />
-        </Field>
 
-        <Field label={`Stop loss · ${riskPct}%`}>
+        {sizingMode === 'risk' ? (
+          <Field label="Max risk · USD">
+            <Input value={riskUsd} prefix="$" onChange={(v) => setRiskUsd(Math.max(1, Number(v)))} />
+          </Field>
+        ) : (
+          <Field label="Size · lots">
+            <div className="flex h-8 items-center justify-between rounded-md border border-ink-700 bg-ink-800 px-1">
+              <button onClick={() => adjustLots(-0.01)} className="h-6 w-7 rounded text-fg-400 hover:bg-ink-700" aria-label="Decrease lots">−</button>
+              <span className="tnum text-[12px] font-semibold text-fg-100">{manualLots.toFixed(2)}</span>
+              <button onClick={() => adjustLots(0.01)} className="h-6 w-7 rounded text-fg-400 hover:bg-ink-700" aria-label="Increase lots">+</button>
+            </div>
+          </Field>
+        )}
+
+        <Field label={`Stop loss · ${priceDeltaPct.toFixed(2)}%`}>
           <Input value={sl} onChange={(v) => setSl(Number(v))} />
         </Field>
-        <Field label={`Take profit · ${rewardPct}%`}>
+        <Field label="Take profit">
           <Input value={tp} onChange={(v) => setTp(Number(v))} />
         </Field>
       </div>
 
-      <div className="flex items-center justify-between border-t border-ink-700/70 pt-2 text-[10px] text-fg-400">
-        <span>Risk / Reward</span>
-        <span className="tnum text-[13px] font-semibold text-gold-400">1 : {rr}</span>
+      <div className="mt-3 rounded-lg border border-ink-700/80 bg-ink-950/60 p-2.5">
+        <div className="mb-2 flex items-center justify-between text-[9px]">
+          <span className="flex items-center gap-1 font-bold uppercase tracking-[0.1em] text-fg-500">
+            <Calculator className="h-3 w-3" /> Broker-aware sizing
+          </span>
+          <span className="font-semibold text-gold-300">{riskLabel}</span>
+        </div>
+        <div className="grid grid-cols-4 gap-2">
+          <Summary label="Lots" value={lots ? String(lots) : '—'} />
+          <Summary label="Risk" value={preview ? fmtMoney(-preview.riskUsd) : '—'} tone="text-bear-400" />
+          <Summary label="Reward" value={preview?.rewardUsd != null ? fmtMoney(preview.rewardUsd) : '—'} tone="text-bull-400" />
+          <Summary label="R:R" value={rr ? `1:${Number(rr).toFixed(2)}` : '—'} tone="text-gold-300" />
+        </div>
+        <div className="mt-2 flex items-center justify-between border-t border-ink-800 pt-2 text-[9px] text-fg-500">
+          <span>Margin estimate</span>
+          <span className="tnum text-fg-300">{preview?.margin != null ? fmtMoney(preview.margin) : 'Broker quote required'}</span>
+        </div>
       </div>
 
       {live && (
-        <Field label="Live execution key · required for LIVE orders">
-          <div className="flex h-8 items-center gap-1 rounded-md border border-ink-700 bg-ink-800 px-2 focus-within:border-gold-600/50">
-            <input
-              type="password"
-              value={liveKey}
-              onChange={(e) => {
-                setLiveKeyState(e.target.value)
-                setLiveKey(e.target.value.trim())
-              }}
-              placeholder="X-Auric-Key from server .env"
-              autoComplete="off"
-              className="w-full bg-transparent text-right text-[12px] text-fg-100 outline-none placeholder:text-fg-600"
-              aria-label="Live execution key"
-            />
-          </div>
-        </Field>
+        <div className="mt-3">
+          <Field label="Live execution key">
+            <div className="flex h-8 items-center gap-2 rounded-md border border-ink-700 bg-ink-800 px-2 focus-within:border-gold-600/60">
+              <LockKeyhole className="h-3.5 w-3.5 text-fg-500" />
+              <input
+                type="password"
+                value={liveKey}
+                onChange={(e) => {
+                  const value = e.target.value.trim()
+                  setLiveKeyState(value)
+                  setLiveKey(value)
+                }}
+                placeholder="Required for live mutations"
+                autoComplete="off"
+                className="w-full bg-transparent text-[11px] text-fg-100 outline-none placeholder:text-fg-600"
+                aria-label="Live execution key"
+              />
+            </div>
+          </Field>
+        </div>
       )}
 
-      <div className="grid grid-cols-2 gap-2">
+      <div className="mt-3 grid grid-cols-2 gap-2">
         <button
-          disabled={pending}
+          disabled={pending || lots <= 0}
           onClick={() => submit('sell')}
-          className="flex h-11 flex-col items-center justify-center rounded-lg bg-gradient-to-br from-bear-500 to-bear-600 text-white shadow-[0_4px_14px_rgba(0,0,0,0.35)] transition-transform hover:-translate-y-px hover:shadow-[0_6px_18px_rgba(234,57,67,0.25)] disabled:opacity-50"
+          className="group flex h-12 items-center justify-between rounded-lg border border-bear-500/35 bg-bear-500/10 px-3 text-bear-300 transition hover:bg-bear-500/18 disabled:opacity-40"
         >
-          <span className="flex items-center gap-1 text-[11px] font-extrabold uppercase tracking-[0.08em]">
-            <TrendingDown className="h-3.5 w-3.5" /> Sell
+          <span className="flex items-center gap-2 text-[11px] font-extrabold uppercase tracking-[0.08em]">
+            <TrendingDown className="h-4 w-4" /> Sell
           </span>
-          <span className="tnum text-[9px] font-medium opacity-70">{fmtPrice(quote.bid || quote.price)}</span>
+          <span className="tnum text-[10px] text-bear-200/80">{fmtPrice(quote.bid || quote.price)}</span>
         </button>
         <button
-          disabled={pending}
+          disabled={pending || lots <= 0}
           onClick={() => submit('buy')}
-          className="flex h-11 flex-col items-center justify-center rounded-lg bg-gradient-to-br from-bull-500 to-[#0e8a5a] text-white shadow-[0_4px_14px_rgba(0,0,0,0.35)] transition-transform hover:-translate-y-px hover:shadow-[0_6px_18px_rgba(22,199,132,0.25)] disabled:opacity-50"
+          className="group flex h-12 items-center justify-between rounded-lg border border-bull-500/35 bg-bull-500/10 px-3 text-bull-300 transition hover:bg-bull-500/18 disabled:opacity-40"
         >
-          <span className="flex items-center gap-1 text-[11px] font-extrabold uppercase tracking-[0.08em]">
-            <TrendingUp className="h-3.5 w-3.5" /> Buy
+          <span className="flex items-center gap-2 text-[11px] font-extrabold uppercase tracking-[0.08em]">
+            <TrendingUp className="h-4 w-4" /> Buy
           </span>
-          <span className="tnum text-[9px] font-medium opacity-70">{fmtPrice(quote.ask)}</span>
+          <span className="tnum text-[10px] text-bull-200/80">{fmtPrice(quote.ask || quote.price)}</span>
         </button>
-      </div>
-
-      <div className="grid grid-cols-3 gap-1.5 rounded-md border border-ink-700/70 bg-ink-800 p-2">
-        <Summary label="Margin" value={fmtMoney(margin)} />
-        <Summary label="At stop" value={fmtMoney(atStop)} tone="text-bear-500" />
-        <Summary label="At target" value={fmtMoney(atTarget)} tone="text-bull-500" />
       </div>
 
       {status && (
         <div
           className={clsx(
-            'rounded-md border px-2 py-1.5 text-[10px]',
+            'mt-3 rounded-md border px-2.5 py-2 text-[10px]',
             status.kind === 'success'
-              ? 'border-bull-500/30 bg-bull-500/10 text-bull-500'
+              ? 'border-bull-500/30 bg-bull-500/10 text-bull-400'
               : 'border-bear-500/30 bg-bear-500/10 text-bear-400',
           )}
           aria-live="polite"
@@ -193,14 +279,14 @@ export function OrderTicket({ quote, live, activeSymbol = 'XAUUSD' }: OrderTicke
           {status.msg}
         </div>
       )}
-    </div>
+    </section>
   )
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <label className="flex flex-col gap-1">
-      <span className="text-[9px] font-bold uppercase tracking-[0.1em] text-fg-500">{label}</span>
+    <label className="flex min-w-0 flex-col gap-1">
+      <span className="truncate text-[8px] font-bold uppercase tracking-[0.12em] text-fg-500">{label}</span>
       {children}
     </label>
   )
@@ -210,40 +296,29 @@ function Input({
   value,
   onChange,
   prefix,
-  ariaLabel,
 }: {
   value: number | string
   onChange?: (v: number | string) => void
   prefix?: string
-  ariaLabel?: string
 }) {
   return (
-    <div className="flex h-8 items-center gap-1 rounded-md border border-ink-700 bg-ink-800 px-2 focus-within:border-ink-500">
-      {prefix && <span className="text-[11px] text-fg-500">{prefix}</span>}
+    <div className="flex h-8 items-center gap-1 rounded-md border border-ink-700 bg-ink-800 px-2 focus-within:border-gold-600/60">
+      {prefix ? <span className="text-[10px] text-fg-500">{prefix}</span> : null}
       <input
         value={value}
         onChange={(e) => onChange?.(e.target.value)}
-        className="tnum w-full bg-transparent text-right text-[12px] text-fg-100 outline-none"
+        className="tnum w-full min-w-0 bg-transparent text-right text-[11px] text-fg-100 outline-none"
         inputMode="decimal"
-        aria-label={ariaLabel ?? 'value'}
       />
     </div>
   )
 }
 
-function Summary({
-  label,
-  value,
-  tone,
-}: {
-  label: string
-  value: string
-  tone?: string
-}) {
+function Summary({ label, value, tone }: { label: string; value: string; tone?: string }) {
   return (
-    <div className="flex flex-col">
-      <span className="text-[8px] font-bold uppercase tracking-[0.1em] text-fg-500">{label}</span>
-      <span className={clsx('tnum text-[12px] font-semibold text-fg-100', tone)}>{value}</span>
+    <div className="min-w-0">
+      <div className="text-[8px] font-bold uppercase tracking-[0.1em] text-fg-600">{label}</div>
+      <div className={clsx('tnum truncate text-[11px] font-semibold text-fg-100', tone)}>{value}</div>
     </div>
   )
 }

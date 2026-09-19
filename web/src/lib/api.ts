@@ -15,6 +15,10 @@ import type {
   KronosStatus,
   KronosForecast,
   KronosDataset,
+  RiskPreview,
+  LoginResult,
+  ProductionStatus,
+  ReadinessStatus,
 } from './types'
 
 export class ApiError extends Error {
@@ -27,10 +31,11 @@ export class ApiError extends Error {
 }
 
 export const LIVE_KEY_STORAGE = 'auric.liveKey'
+export const SESSION_STORAGE = 'auric.session.v1'
 
 export function getLiveKey(): string {
   try {
-    return localStorage.getItem(LIVE_KEY_STORAGE) || ''
+    return sessionStorage.getItem(LIVE_KEY_STORAGE) || ''
   } catch {
     return ''
   }
@@ -38,8 +43,25 @@ export function getLiveKey(): string {
 
 export function setLiveKey(key: string): void {
   try {
-    if (key) localStorage.setItem(LIVE_KEY_STORAGE, key)
-    else localStorage.removeItem(LIVE_KEY_STORAGE)
+    if (key) sessionStorage.setItem(LIVE_KEY_STORAGE, key)
+    else sessionStorage.removeItem(LIVE_KEY_STORAGE)
+  } catch {
+    /* ignore */
+  }
+}
+
+export function getSessionToken(): string {
+  try {
+    return sessionStorage.getItem(SESSION_STORAGE) || ''
+  } catch {
+    return ''
+  }
+}
+
+export function setSessionToken(token: string): void {
+  try {
+    if (token) sessionStorage.setItem(SESSION_STORAGE, token)
+    else sessionStorage.removeItem(SESSION_STORAGE)
   } catch {
     /* ignore */
   }
@@ -48,7 +70,9 @@ export function setLiveKey(key: string): void {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   const liveKey = getLiveKey()
-  // Server fail-closes live mutations without a matching X-Auric-Key.
+  const session = getSessionToken()
+  // Operator identity and live-execution authorization are intentionally separate.
+  if (session) headers.Authorization = `Bearer ${session}`
   if (liveKey) headers['X-Auric-Key'] = liveKey
   const res = await fetch(path, {
     ...init,
@@ -75,15 +99,27 @@ export interface SymbolSummary {
 
 export const api = {
   health: () => request<Health>('/api/health'),
+  login: (username: string, password: string) =>
+    request<LoginResult>('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
+  me: () => request<{ authenticated: boolean; claims?: Record<string, unknown> }>('/api/auth/me'),
+  readiness: () => request<ReadinessStatus>('/api/readiness'),
+  productionStatus: () => request<ProductionStatus>('/api/production/status'),
+  reconciliation: () => request<ProductionStatus['reconciliation']>('/api/reconciliation'),
   quote: () => request<Quote>('/api/quote'),
   strategies: () => request<StrategiesResponse>('/api/strategies'),
   account: () => request<Account>('/api/account'),
   symbols: () => request<{ symbols: SymbolSummary[] }>('/api/symbols'),
   symbolQuote: (symbol: string) =>
     request<Quote>(`/api/symbols/${encodeURIComponent(symbol)}/quote`).catch(() => null as unknown as Quote),
-  positions: () => request<PositionsResponse>('/api/positions'),
+  positions: (mode: 'paper' | 'live' | 'all' = 'all', symbol?: string) => {
+    const params = new URLSearchParams({ mode })
+    if (symbol) params.set('symbol', symbol)
+    return request<PositionsResponse>(`/api/positions?${params.toString()}`)
+  },
   journal: (limit = 100) => request<JournalResponse>(`/api/journal?limit=${limit}`),
   engine: () => request<EngineStatus>('/api/engine'),
+  symbolEngine: (symbol: string) =>
+    request<EngineStatus>(`/api/symbols/${encodeURIComponent(symbol)}`),
   candles: (interval: string, outputsize = 300, symbol?: string) =>
     request<CandleResponse>(
       `/api/candles?interval=${interval}&outputsize=${outputsize}&symbol=${symbol ?? 'XAUUSD'}`,
@@ -99,6 +135,15 @@ export const api = {
   }) => request<BacktestResult>('/api/backtest', { method: 'POST', body: JSON.stringify(payload) }),
   order: (payload: OrderRequest & { symbol?: string }) =>
     request<OrderResult>('/api/orders', { method: 'POST', body: JSON.stringify(payload) }),
+  riskPreview: (payload: {
+    symbol: string
+    side: 'buy' | 'sell'
+    entry: number
+    stop: number
+    target?: number | null
+    risk_pct?: number
+    risk_amount?: number | null
+  }) => request<RiskPreview>('/api/risk/preview', { method: 'POST', body: JSON.stringify(payload) }),
   engineStart: () => request<EngineStatus>('/api/engine/start', { method: 'POST' }),
   engineStop: () => request<EngineStatus>('/api/engine/stop', { method: 'POST' }),
   symbolStart: (symbol: string) =>

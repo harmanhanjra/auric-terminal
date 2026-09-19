@@ -1,6 +1,6 @@
 import { clsx } from 'clsx'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Power, Save, Loader, RotateCcw } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
+import { Bot, Power, Radio, ShieldCheck } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import { fmtMoney, fmtPrice } from '../lib/format'
@@ -34,168 +34,151 @@ function getCurrentSession(): string {
 }
 
 export function TopBar({ quote, live, onToggleLive, feedStatus, activeSymbol, onSelectSymbol }: TopBarProps) {
-  const queryClient = useQueryClient()
   const { data: account } = useQuery({
     queryKey: ['account'],
     queryFn: api.account,
     refetchInterval: 10_000,
   })
-
-  const toggleLiveMutation = useMutation({
-    mutationFn: async (enable: boolean) => {
-      if (enable) {
-        await api.engineStart()
-      } else {
-        await api.engineStop()
-      }
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['engine'] })
-      queryClient.invalidateQueries({ queryKey: ['symbols'] })
-    },
+  const { data: engine } = useQuery({
+    queryKey: ['engine-topbar', activeSymbol],
+    queryFn: () => api.symbolEngine(activeSymbol),
+    refetchInterval: 3000,
   })
-
-  const handleToggleLive = () => {
-    const newLive = !live
-    onToggleLive(newLive)
-    toggleLiveMutation.mutate(newLive)
-  }
 
   const session = getCurrentSession()
   const priceFlash = usePriceFlash(quote.price)
+  const accountConnected = account?.connected === true
 
   return (
-    <header className="flex h-14 shrink-0 items-center gap-0 border-b border-ink-700 bg-ink-900/80 backdrop-blur supports-[backdrop-filter]:bg-ink-900/70">
-      {/* Brand */}
-      <div className="flex h-full w-[200px] shrink-0 items-center gap-3 border-r border-ink-700 px-4">
-        <div className="grid h-8 w-8 shrink-0 rotate-45 place-items-center rounded-lg border border-gold-600/50 bg-gradient-to-br from-ink-800 to-ink-900 shadow-[0_0_16px_rgba(201,162,39,0.18)]">
-          <span className="h-2.5 w-2.5 rounded-[2px] bg-gold-400 shadow-[0_0_8px_rgba(201,162,39,0.9)]" />
+    <header className="relative z-20 flex h-14 shrink-0 items-center border-b border-ink-700/90 bg-ink-950/95 shadow-[0_8px_30px_rgba(0,0,0,0.22)] backdrop-blur">
+      <div className="flex h-full w-[192px] shrink-0 items-center gap-3 border-r border-ink-700/80 px-4">
+        <div className="relative grid h-8 w-8 place-items-center rounded-lg border border-gold-600/45 bg-ink-900 shadow-[0_0_24px_rgba(201,162,39,0.12)]">
+          <div className="h-3 w-3 rotate-45 rounded-[2px] border border-gold-300/80 bg-gold-400/20" />
+          <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full border-2 border-ink-950 bg-bull-500" />
         </div>
         <div className="leading-tight">
-          <div className="text-[13px] font-bold tracking-[-0.02em] text-fg-100">
-            Auric<span className="text-gold-400">Terminal</span>
+          <div className="text-[13px] font-black tracking-[-0.03em] text-fg-100">
+            AURIC<span className="text-gold-400">/V2</span>
           </div>
-          <div className="text-[9px] font-semibold uppercase tracking-[0.16em] text-fg-500">
-            {activeSymbol} · Multi-Symbol
+          <div className="text-[8px] font-bold uppercase tracking-[0.18em] text-fg-500">
+            Execution Terminal
           </div>
         </div>
       </div>
 
-      {/* Symbol picker — clickable, scrollable, drives header */}
       <SymbolSelector active={activeSymbol} onChange={onSelectSymbol} />
 
-      {/* Quote */}
-      <div className="flex h-full items-center gap-3 border-r border-ink-700 px-4">
+      <div className="flex h-full items-center gap-3 border-r border-ink-700/80 px-4">
         <div>
-          <div className="text-[11px] font-bold text-fg-100">{activeSymbol}</div>
-          <div className="text-[9px] text-fg-500">{quote.source || 'MT5'} · live</div>
+          <div className="flex items-center gap-1.5 text-[10px] font-bold text-fg-200">
+            {activeSymbol}
+            <span className="text-[8px] font-medium text-fg-500">{quote.source || '—'}</span>
+          </div>
+          <div className="mt-0.5 text-[8px] font-bold uppercase tracking-[0.12em] text-fg-600">{session}</div>
         </div>
-        <span className={clsx('tnum text-[22px] font-bold leading-none tracking-[-0.03em] text-fg-100', priceFlash === 'up' && 'animate-flash-up', priceFlash === 'down' && 'animate-flash-down')}>
+        <span className={clsx(
+          'tnum text-[21px] font-bold leading-none tracking-[-0.035em] text-fg-100',
+          priceFlash === 'up' && 'animate-flash-up',
+          priceFlash === 'down' && 'animate-flash-down',
+        )}>
           {fmtPrice(quote.price)}
         </span>
-        <span className="tnum rounded-md border border-ink-700 bg-ink-800 px-2 py-1 text-[10px] font-medium text-fg-300">
-          Spread {quote.spread.toFixed(2)}
+        <span className="tnum rounded border border-ink-700 bg-ink-900 px-1.5 py-1 text-[9px] text-fg-400">
+          SP {fmtPrice(quote.spread)}
         </span>
-        <span className="hidden rounded-md border border-gold-600/30 bg-gold-600/10 px-2 py-1 text-[10px] font-bold tracking-wide text-gold-300 lg:block">
-          {session}
-        </span>
-        <button
-          onClick={handleToggleLive}
-          disabled={toggleLiveMutation.isPending}
-          className={clsx('rounded-md border px-2.5 py-1 text-[10px] font-bold tracking-[0.08em] transition-colors', live ? 'border-bear-500/40 bg-bear-500/10 text-bear-500' : 'border-gold-600/40 bg-gold-600/10 text-gold-300')}
-        >
-          {toggleLiveMutation.isPending ? '...' : live ? 'LIVE' : 'PAPER'}
-        </button>
       </div>
 
-      {/* Ticker — live quotes for tracked symbols, pure CSS marquee */}
-      <div className="hidden flex-1 overflow-hidden lg:block">
+      <div className="hidden min-w-0 flex-1 overflow-hidden xl:block">
         <TickerTape activeSymbol={activeSymbol} activePrice={quote.price} />
       </div>
 
-      {/* Account */}
-      <div className="ml-auto hidden items-center gap-0 md:flex">
-        <div className="flex flex-col items-end border-l border-ink-700 px-3">
-          <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-fg-500">Balance</span>
-          <span className="tnum text-[11px] font-semibold text-fg-100">{fmtMoney(account?.balance ?? 10000)}</span>
+      <div className="ml-auto flex h-full items-center">
+        <div className="hidden h-full items-center gap-4 border-l border-ink-700/80 px-3 lg:flex">
+          <Metric label="Balance" value={accountConnected ? fmtMoney(account?.balance ?? 0) : '—'} />
+          <Metric label="Equity" value={accountConnected ? fmtMoney(account?.equity ?? 0) : '—'} />
+          <Metric label="Free" value={accountConnected ? fmtMoney(account?.freeMargin ?? 0) : '—'} />
         </div>
-        <div className="flex flex-col items-end border-l border-ink-700 px-3">
-          <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-fg-500">Equity</span>
-          <span className="tnum text-[11px] font-semibold text-fg-100">{fmtMoney(account?.equity ?? account?.balance ?? 10000)}</span>
+
+        <div className="flex h-full items-center gap-2 border-l border-ink-700/80 px-3">
+          <span className={clsx(
+            'h-1.5 w-1.5 rounded-full',
+            feedStatus === 'live' ? 'bg-bull-500 shadow-[0_0_8px_rgba(22,199,132,.8)]' :
+            feedStatus === 'delayed' ? 'bg-bear-500' : 'bg-gold-400 pulse-dot',
+          )} />
+          <span className="text-[8px] font-bold uppercase tracking-[0.12em] text-fg-500">{feedStatus}</span>
         </div>
-        <div className="flex flex-col items-end border-l border-ink-700 px-3">
-          <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-fg-500">Free Margin</span>
-          <span className="tnum text-[11px] font-semibold text-fg-100">{fmtMoney(account?.freeMargin ?? 8000)}</span>
+
+        <button
+          onClick={() => onToggleLive(!live)}
+          title="Manual execution environment only. This does not arm the algorithm."
+          className={clsx(
+            'mx-2 flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[9px] font-extrabold uppercase tracking-[0.1em] transition',
+            live
+              ? 'border-bear-500/40 bg-bear-500/10 text-bear-400 hover:bg-bear-500/15'
+              : 'border-gold-600/40 bg-gold-600/10 text-gold-300 hover:bg-gold-600/15',
+          )}
+        >
+          <ShieldCheck className="h-3.5 w-3.5" />
+          Manual {live ? 'Live' : 'Paper'}
+        </button>
+
+        <div className="hidden items-center gap-1.5 border-l border-ink-700/80 px-3 md:flex">
+          <Bot className="h-3.5 w-3.5 text-fg-500" />
+          <div>
+            <div className="text-[8px] font-bold uppercase tracking-[0.1em] text-fg-600">Auto engine</div>
+            <div className={clsx('text-[9px] font-extrabold uppercase', engine?.autoLiveEnabled ? 'text-bear-400' : 'text-gold-300')}>
+              {engine?.autoLiveEnabled ? 'LIVE-ARM CAPABLE' : 'PAPER ONLY'}
+            </div>
+          </div>
         </div>
+
+        <KillSwitch live={live} />
       </div>
-
-      {/* Feed status */}
-      <div className="flex h-full items-center gap-2 border-l border-ink-700 px-3">
-        <span className={clsx('h-2 w-2 rounded-full', feedStatus === 'live' && 'bg-bull-500 shadow-[0_0_8px_rgba(22,199,132,0.8)]', feedStatus === 'connecting' && 'bg-gold-400 pulse-dot', feedStatus === 'delayed' && 'bg-bear-500', (feedStatus === 'Demo' || feedStatus === 'closed') && 'bg-fg-500')} />
-        <span className="text-[10px] font-medium text-fg-400">{feedStatus}</span>
-      </div>
-
-      <KillSwitch live={live} />
-
-      <div className="flex h-full items-center gap-1 border-l border-ink-700 px-2">
-        <IconBtn label="Save layout"><Save className="h-3.5 w-3.5" /></IconBtn>
-        <IconBtn label="Load layout"><Loader className="h-3.5 w-3.5" /></IconBtn>
-        <IconBtn label="Reset layout"><RotateCcw className="h-3.5 w-3.5" /></IconBtn>
-      </div>
-
-      <style>{`@keyframes marquee { from { transform: translateX(0) } to { transform: translateX(-50%) } }`}</style>
     </header>
   )
 }
 
-function IconBtn({ children, label }: { children: React.ReactNode; label: string }) {
+function Metric({ label, value }: { label: string; value: string }) {
   return (
-    <button title={label} aria-label={label} className="grid h-7 w-7 place-items-center rounded-md text-fg-500 hover:bg-ink-800 hover:text-fg-200">
-      {children}
-    </button>
+    <div className="text-right">
+      <div className="text-[7px] font-bold uppercase tracking-[0.13em] text-fg-600">{label}</div>
+      <div className="tnum text-[10px] font-semibold text-fg-200">{value}</div>
+    </div>
   )
 }
 
 function TickerTape({ activeSymbol, activePrice }: { activeSymbol: string; activePrice: number }) {
   const { data } = useQuery({
-    queryKey: ['ticker-quotes'],
+    queryKey: ['ticker-quotes', activeSymbol],
     queryFn: async () => {
       const syms = ['XAUUSD', 'BTCUSD', 'EURUSD']
-      const out: { sym: string; price: number }[] = []
-      for (const s of syms) {
-        if (s === activeSymbol) {
-          out.push({ sym: s, price: activePrice })
-          continue
-        }
-        try {
-          const q = await api.symbolQuote(s)
-          if (q && q.price > 0) out.push({ sym: s, price: q.price })
-        } catch {
-          /* skip — tape shows the rest */
-        }
-      }
-      return out
+      const results = await Promise.allSettled(
+        syms.map(async (sym) => {
+          if (sym === activeSymbol) return { sym, price: activePrice }
+          const q = await api.symbolQuote(sym)
+          return { sym, price: q.price }
+        }),
+      )
+      return results
+        .filter((r): r is PromiseFulfilledResult<{ sym: string; price: number }> => r.status === 'fulfilled')
+        .map((r) => r.value)
+        .filter((r) => r.price > 0)
     },
-    refetchInterval: 15_000,
-    staleTime: 10_000,
+    refetchInterval: 12_000,
+    staleTime: 8_000,
     retry: false,
   })
+
   const items = data?.length ? data : [{ sym: activeSymbol, price: activePrice }]
   return (
-    <div className="animate-[marquee_30s_linear_infinite] flex items-center gap-6 whitespace-nowrap text-[10px]">
+    <div className="flex h-14 items-center gap-6 overflow-hidden px-4 text-[9px]">
       {items.map((t) => (
-        <TickerItem key={t.sym} sym={t.sym} price={t.price} />
+        <span key={t.sym} className="flex shrink-0 items-center gap-2">
+          <span className="font-extrabold text-fg-300">{t.sym}</span>
+          <span className="tnum text-fg-500">{fmtPrice(t.price)}</span>
+        </span>
       ))}
     </div>
-  )
-}
-
-function TickerItem({ sym, price }: { sym: string; price: number }) {
-  return (
-    <span className="flex items-center gap-1.5">
-      <span className="font-bold text-fg-100">{sym}</span>
-      <span className="tnum text-fg-300">{fmtPrice(price)}</span>
-    </span>
   )
 }
 
@@ -215,37 +198,53 @@ function usePriceFlash(value: number) {
 
 function KillSwitch({ live }: { live: boolean }) {
   const [arming, setArming] = useState(false)
+  const [result, setResult] = useState<string | null>(null)
   const timer = useRef<number | null>(null)
 
   const start = () => {
     setArming(true)
+    setResult(null)
     timer.current = window.setTimeout(async () => {
       try {
-        await api.kill(live ? 'live' : 'paper')
-      } catch {
-        /* toast handled by caller */
+        const r = await api.kill(live ? 'live' : 'paper')
+        setResult(`${r.closed} closed / ${r.cancelled} cancelled`)
+      } catch (e) {
+        setResult(e instanceof Error ? e.message : 'Kill failed')
+      } finally {
+        setArming(false)
       }
-      setArming(false)
     }, 1500)
   }
+
   const cancel = () => {
     if (timer.current) window.clearTimeout(timer.current)
     setArming(false)
   }
 
   return (
-    <button
-      onPointerDown={start}
-      onPointerUp={cancel}
-      onPointerLeave={cancel}
-      className={clsx('relative mr-2 overflow-hidden rounded-md border px-3 py-2 text-[10px] font-bold uppercase tracking-[0.08em] transition-colors', arming ? 'border-bear-400 bg-bear-500 text-white' : 'border-bear-500/30 bg-ink-800 text-bear-400 hover:bg-bear-500/10')}
-      title="Hold 1.5s to kill — reliable halt before cancel/flatten"
-    >
-      {arming && <span className="absolute inset-0 animate-pulse bg-bear-500/15" />}
-      <span className="relative flex items-center gap-1.5">
-        <Power className="h-3 w-3" />
-        {arming ? 'ARMING…' : 'KILL'}
-      </span>
-    </button>
+    <div className="relative mr-2">
+      <button
+        onPointerDown={start}
+        onPointerUp={cancel}
+        onPointerLeave={cancel}
+        className={clsx(
+          'relative overflow-hidden rounded-md border px-3 py-2 text-[9px] font-black uppercase tracking-[0.1em] transition',
+          arming
+            ? 'border-bear-300 bg-bear-500 text-white'
+            : 'border-bear-500/35 bg-bear-500/8 text-bear-400 hover:bg-bear-500/15',
+        )}
+        title="Hold 1.5 seconds: global Auric halt + cancel + flatten"
+      >
+        <span className="relative flex items-center gap-1.5">
+          {arming ? <Radio className="h-3.5 w-3.5 animate-pulse" /> : <Power className="h-3.5 w-3.5" />}
+          {arming ? 'GLOBAL KILL…' : 'KILL ALL'}
+        </span>
+      </button>
+      {result ? (
+        <div className="absolute right-0 top-11 z-50 w-52 rounded-md border border-ink-700 bg-ink-900 px-2 py-1.5 text-[9px] text-fg-300 shadow-xl">
+          {result}
+        </div>
+      ) : null}
+    </div>
   )
 }
