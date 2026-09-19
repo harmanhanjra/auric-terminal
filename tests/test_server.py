@@ -308,3 +308,55 @@ def test_global_paper_kill_flattens_all(client, monkeypatch):
     assert killed["closed"] >= 2
     assert client.get("/api/positions?mode=paper").json()["positions"] == []
     client.post("/api/risk/reset")
+
+
+
+def test_operator_auth_middleware_roundtrip(client, monkeypatch):
+    import server
+    from production_core import OperatorAuth
+    monkeypatch.setenv("AURIC_REQUIRE_AUTH", "true")
+    monkeypatch.setenv("AURIC_AUTH_SECRET", "s" * 32)
+    monkeypatch.setenv("AURIC_OPERATOR_USERNAME", "operator")
+    monkeypatch.setenv("AURIC_OPERATOR_PASSWORD", "correct-horse-battery-staple")
+    monkeypatch.setattr(server, "operator_auth", OperatorAuth())
+
+    denied = client.get("/api/account")
+    assert denied.status_code == 401
+
+    login = client.post("/api/auth/login", json={
+        "username": "operator",
+        "password": "correct-horse-battery-staple",
+    })
+    assert login.status_code == 200
+    token = login.json()["token"]
+
+    allowed = client.get("/api/account", headers={"Authorization": f"Bearer {token}"})
+    assert allowed.status_code == 200
+
+
+def test_shadow_stage_blocks_manual_paper_orders(client, monkeypatch):
+    import server
+    from production_core import ExecutionPolicy
+    monkeypatch.setattr(server, "execution_policy", ExecutionPolicy("shadow"))
+    monkeypatch.setattr(server, "latest_by_symbol", {
+        "XAUUSD": {"symbol": "XAUUSD", "bid": 5000.0, "ask": 5000.18,
+                   "spread": 0.18, "source": "test", "timestamp": 1}
+    })
+    r = client.post("/api/orders", json={
+        "symbol": "XAUUSD",
+        "side": "buy",
+        "lots": 0.01,
+        "order_type": "market",
+        "mode": "paper",
+        "client_order_id": "shadow-block-v3",
+    })
+    assert r.status_code == 403
+
+
+def test_production_status_endpoint(client):
+    r = client.get("/api/production/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert "policy" in body
+    assert "reconciliation" in body
+    assert "limits" in body
