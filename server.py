@@ -2052,12 +2052,15 @@ async def order(req: OrderRequest, request: Request):
         raise HTTPException(422, "Limit/stop orders require entry_price")
     if req.lots > MAX_LOT:
         raise HTTPException(422, f"Lot size exceeds server hard cap ({MAX_LOT})")
-    if (
-        req.mode == "live"
-        and os.getenv("REQUIRE_LIVE_STOP_LOSS", "true").lower() == "true"
-        and req.stop_loss is None
-    ):
-        raise HTTPException(422, "Production live orders require a stop loss")
+    if req.mode == "live":
+        if not LIVE_ENABLED:
+            raise HTTPException(403, "Manual live execution is disabled on the server")
+        _require_live_auth(request)
+        if (
+            os.getenv("REQUIRE_LIVE_STOP_LOSS", "true").lower() == "true"
+            and req.stop_loss is None
+        ):
+            raise HTTPException(422, "Production live orders require a stop loss")
 
     tick_info = latest_by_symbol.get(sym, {})
     if not tick_info and isinstance(latest, dict):
