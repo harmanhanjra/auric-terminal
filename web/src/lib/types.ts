@@ -9,13 +9,73 @@ export interface Quote {
   error?: string
 }
 
+export type ExecutionStage = 'shadow' | 'paper' | 'assisted' | 'auto'
+
 export interface Health {
   ok: boolean
+  version?: string
   source: string
   liveTrading: boolean
   autoLiveTrading?: boolean
+  executionStage?: ExecutionStage
+  halted?: boolean
   symbol: string
   timestamp: number
+}
+
+export interface RiskPolicy {
+  maxOpenPositions: number
+  maxTotalLots: number
+  maxSymbolLots: number
+  minMarginLevelPct: number
+  maxMarginUsagePct: number
+  maxRiskPerTradePct: number
+}
+
+export interface ProductionStatus {
+  authRequired: boolean
+  configuredPrincipals: number
+  executionStage: ExecutionStage
+  circuit: {
+    halted: boolean
+    reason: string
+    haltedAt: number
+  }
+  newsGuard: {
+    enabled: boolean
+    minImpact: string
+  }
+  riskPolicy: RiskPolicy
+  lastReconciliation?: {
+    id: number
+    ts: number
+    status: string
+    summary: Record<string, unknown>
+  } | null
+  version: string
+  mt5Connected: boolean
+  manualLiveEnabled: boolean
+  autoLiveEnabled: boolean
+  trackedSymbols: string[]
+}
+
+export interface Readiness {
+  ready: boolean
+  checks: Record<string, boolean>
+  source?: string
+  production: ProductionStatus
+  timestamp: number
+}
+
+export interface NewsEvent {
+  id: number
+  title: string
+  impact: 'low' | 'medium' | 'high'
+  start_ms: number
+  end_ms: number
+  symbols: string[]
+  source: string
+  enabled: number
 }
 
 export interface Candle {
@@ -143,6 +203,11 @@ export interface EngineStatus {
   risk: EngineRisk
   manualLiveEnabled?: boolean
   autoLiveEnabled?: boolean
+  production?: {
+    executionStage: ExecutionStage
+    globalHalt: boolean
+    liveGate: string
+  }
 }
 
 export interface BacktestMetrics {
