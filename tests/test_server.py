@@ -170,7 +170,9 @@ def test_order_live_disabled(client):
 
 def test_live_order_requires_execution_key(client, monkeypatch):
     import server
+    from production_core import ExecutionPolicy
     monkeypatch.setattr(server, "LIVE_ENABLED", True)
+    monkeypatch.setattr(server, "execution_policy", ExecutionPolicy("assisted"))
     monkeypatch.setattr(server, "LIVE_API_KEY", "test-secret-key")
     r = client.post("/api/orders", json={
         "side": "sell", "lots": 0.2, "stop_loss": None, "take_profit": None,
@@ -180,7 +182,9 @@ def test_live_order_requires_execution_key(client, monkeypatch):
 
 def test_live_execution_fails_closed_without_configured_key(client, monkeypatch):
     import server
+    from production_core import ExecutionPolicy
     monkeypatch.setattr(server, "LIVE_ENABLED", True)
+    monkeypatch.setattr(server, "execution_policy", ExecutionPolicy("assisted"))
     monkeypatch.setattr(server, "LIVE_API_KEY", "")
     r = client.post("/api/orders", json={
         "side": "sell", "lots": 0.2, "stop_loss": None, "take_profit": None,
