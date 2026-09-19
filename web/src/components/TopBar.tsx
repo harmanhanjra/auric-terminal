@@ -58,10 +58,10 @@ export function TopBar({ quote, live, onToggleLive, feedStatus, activeSymbol, on
         </div>
         <div className="leading-tight">
           <div className="text-[13px] font-black tracking-[-0.03em] text-fg-100">
-            AURIC<span className="text-gold-400">/V2</span>
+            AURIC<span className="text-gold-400">/V3</span>
           </div>
           <div className="text-[8px] font-bold uppercase tracking-[0.18em] text-fg-500">
-            Execution Terminal
+            Production Terminal
           </div>
         </div>
       </div>

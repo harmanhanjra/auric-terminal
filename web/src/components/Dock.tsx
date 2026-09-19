@@ -29,11 +29,19 @@ type DockTab = 'positions' | 'journal' | 'risk' | 'signals' | 'logs'
 
 export function Dock({ live, onNavigate }: DockProps) {
   const [activeTab, setActiveTab] = useState<DockTab>('positions')
+  const [actionTicket, setActionTicket] = useState<number | null>(null)
+  const [actionMessage, setActionMessage] = useState<string | null>(null)
 
   // Queries connected to backend endpoints
   const { data: positionsData, refetch: refetchPositions } = useQuery({
     queryKey: ['positions', live],
     queryFn: () => api.positions(live ? 'live' : 'paper'),
+    refetchInterval: 3000,
+  })
+
+  const { data: pendingData, refetch: refetchPending } = useQuery({
+    queryKey: ['pending-orders', live],
+    queryFn: () => api.pendingOrders(live ? 'live' : 'paper'),
     refetchInterval: 3000,
   })
 
@@ -56,11 +64,51 @@ export function Dock({ live, onNavigate }: DockProps) {
   })
 
   const positions = positionsData?.positions ?? []
+  const pendingOrders = pendingData?.orders ?? []
   const journalEntries = journalData?.entries ?? []
   const engineLog = engineData?.log ?? []
   const engineRisk = engineData?.risk
 
   const totalPnl = positions.reduce((acc, p) => acc + (p.pnl || 0), 0)
+
+  const runPositionAction = async (
+    ticket: number,
+    action: 'breakeven' | 'half' | 'close',
+    lots: number,
+  ) => {
+    setActionTicket(ticket)
+    setActionMessage(null)
+    try {
+      if (action === 'breakeven') {
+        await api.protectPosition(ticket, live ? 'live' : 'paper', { breakeven: true })
+      } else {
+        const closeLots = action === 'half' ? Math.max(0.01, lots / 2) : undefined
+        await api.closePosition(ticket, live ? 'live' : 'paper', closeLots)
+      }
+      setActionMessage(
+        action === 'breakeven' ? `#${ticket} moved to breakeven` : `#${ticket} close request accepted`,
+      )
+      await Promise.all([refetchPositions(), refetchJournal()])
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : 'Position action failed')
+    } finally {
+      setActionTicket(null)
+    }
+  }
+
+  const cancelPending = async (ticket: number) => {
+    setActionTicket(ticket)
+    setActionMessage(null)
+    try {
+      await api.cancelPending(ticket, live ? 'live' : 'paper')
+      setActionMessage(`Pending order #${ticket} cancelled`)
+      await Promise.all([refetchPending(), refetchJournal()])
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : 'Cancellation failed')
+    } finally {
+      setActionTicket(null)
+    }
+  }
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-ink-900 text-fg-200">
@@ -167,6 +215,7 @@ export function Dock({ live, onNavigate }: DockProps) {
           <button
             onClick={() => {
               refetchPositions()
+              refetchPending()
               refetchJournal()
               refetchEngine()
             }}
@@ -177,6 +226,12 @@ export function Dock({ live, onNavigate }: DockProps) {
           </button>
         </div>
       </div>
+
+      {actionMessage ? (
+        <div className="shrink-0 border-b border-ink-700/60 bg-ink-950/80 px-3 py-1 text-[9px] text-fg-400" aria-live="polite">
+          {actionMessage}
+        </div>
+      ) : null}
 
       {/* Dock Content Body */}
       <div className="min-h-0 flex-1 overflow-auto p-2">
@@ -202,7 +257,8 @@ export function Dock({ live, onNavigate }: DockProps) {
                     <th className="pb-1.5 font-medium">Current Price</th>
                     <th className="pb-1.5 font-medium">Stop Loss</th>
                     <th className="pb-1.5 font-medium">Take Profit</th>
-                    <th className="pb-1.5 pr-2 text-right font-medium">Net P/L</th>
+                    <th className="pb-1.5 text-right font-medium">Net P/L</th>
+                    <th className="pb-1.5 pr-2 text-right font-medium">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-ink-800/60">
@@ -229,11 +285,39 @@ export function Dock({ live, onNavigate }: DockProps) {
                         <td className="tnum py-2 text-fg-400">{p.tp ? fmtPrice(p.tp) : '—'}</td>
                         <td
                           className={clsx(
-                            'tnum py-2 pr-2 text-right font-bold',
+                            'tnum py-2 text-right font-bold',
                             p.pnl > 0 ? 'text-bull-500' : p.pnl < 0 ? 'text-bear-500' : 'text-fg-300',
                           )}
                         >
                           {p.pnl >= 0 ? `+${fmtMoney(p.pnl)}` : fmtMoney(p.pnl)}
+                        </td>
+                        <td className="py-1.5 pr-2">
+                          <div className="flex justify-end gap-1">
+                            <button
+                              disabled={!p.ticket || actionTicket === p.ticket}
+                              onClick={() => p.ticket && runPositionAction(p.ticket, 'breakeven', p.lots)}
+                              className="rounded border border-ink-700 bg-ink-800 px-1.5 py-1 text-[8px] font-bold text-gold-300 hover:bg-ink-700 disabled:opacity-30"
+                              title="Move stop loss to entry price"
+                            >
+                              BE
+                            </button>
+                            <button
+                              disabled={!p.ticket || actionTicket === p.ticket || p.lots <= 0.01}
+                              onClick={() => p.ticket && runPositionAction(p.ticket, 'half', p.lots)}
+                              className="rounded border border-ink-700 bg-ink-800 px-1.5 py-1 text-[8px] font-bold text-fg-300 hover:bg-ink-700 disabled:opacity-30"
+                              title="Close half of the position"
+                            >
+                              ½
+                            </button>
+                            <button
+                              disabled={!p.ticket || actionTicket === p.ticket}
+                              onClick={() => p.ticket && runPositionAction(p.ticket, 'close', p.lots)}
+                              className="rounded border border-bear-500/25 bg-bear-500/8 px-1.5 py-1 text-[8px] font-bold text-bear-400 hover:bg-bear-500/15 disabled:opacity-30"
+                              title="Close the full position"
+                            >
+                              Close
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     )
@@ -243,6 +327,60 @@ export function Dock({ live, onNavigate }: DockProps) {
             )}
           </div>
         )}
+
+        {activeTab === 'positions' && pendingOrders.length > 0 ? (
+          <div className="mt-3 border-t border-ink-700/60 pt-2">
+            <div className="mb-1.5 flex items-center justify-between px-1">
+              <span className="text-[9px] font-extrabold uppercase tracking-[0.1em] text-fg-500">
+                Pending orders
+              </span>
+              <span className="rounded bg-ink-800 px-1.5 py-0.5 text-[8px] font-bold text-fg-400">
+                {pendingOrders.length}
+              </span>
+            </div>
+            <table className="w-full text-left text-[10px]">
+              <thead>
+                <tr className="border-b border-ink-700/60 text-[8px] uppercase tracking-[0.1em] text-fg-600">
+                  <th className="pb-1 pl-2 font-medium">Symbol</th>
+                  <th className="pb-1 font-medium">Side</th>
+                  <th className="pb-1 font-medium">Type</th>
+                  <th className="pb-1 font-medium">Lots</th>
+                  <th className="pb-1 font-medium">Entry</th>
+                  <th className="pb-1 font-medium">SL / TP</th>
+                  <th className="pb-1 pr-2 text-right font-medium">Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-ink-800/50">
+                {pendingOrders.map((order) => (
+                  <tr key={order.ticket} className="hover:bg-ink-800/30">
+                    <td className="py-1.5 pl-2 font-bold text-fg-200">{order.symbol}</td>
+                    <td className={clsx(
+                      'py-1.5 font-bold uppercase',
+                      order.side === 'buy' ? 'text-bull-400' : 'text-bear-400',
+                    )}>
+                      {order.side ?? '—'}
+                    </td>
+                    <td className="py-1.5 uppercase text-fg-400">{order.orderType ?? 'pending'}</td>
+                    <td className="tnum py-1.5 text-fg-300">{order.lots.toFixed(2)}</td>
+                    <td className="tnum py-1.5 text-fg-300">{fmtPrice(order.entry)}</td>
+                    <td className="tnum py-1.5 text-fg-500">
+                      {order.sl ? fmtPrice(order.sl) : '—'} / {order.tp ? fmtPrice(order.tp) : '—'}
+                    </td>
+                    <td className="py-1.5 pr-2 text-right">
+                      <button
+                        disabled={actionTicket === order.ticket}
+                        onClick={() => cancelPending(order.ticket)}
+                        className="rounded border border-bear-500/25 bg-bear-500/8 px-2 py-1 text-[8px] font-bold text-bear-400 hover:bg-bear-500/15 disabled:opacity-30"
+                      >
+                        Cancel
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
 
         {/* TAB 2: TRADE JOURNAL */}
         {activeTab === 'journal' && (

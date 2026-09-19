@@ -57,7 +57,7 @@ class SymbolEngine:
                  magic: int, live_enabled: bool, max_lot: float,
                  max_daily_loss: float, journal, tg_notify_fn,
                  kronos_engine_mod, kronos_ok: bool, mt5_timeframes: dict,
-                 engine_mod):
+                 engine_mod, control_plane=None, execution_ledger=None):
         self.symbol = symbol
         self.mt5 = mt5_mod
         self._mt5_ready = mt5_ready_ref  # shared mutable ref
@@ -71,6 +71,8 @@ class SymbolEngine:
         self.kronos_ok = kronos_ok
         self.mt5_timeframes = mt5_timeframes
         self.engine_mod = engine_mod
+        self.control_plane = control_plane
+        self.execution_ledger = execution_ledger
 
         # Per-symbol engine config (all symbols share same defaults)
         self.config: Dict[str, Any] = {
@@ -162,6 +164,11 @@ class SymbolEngine:
                 "dailyLoss": self.max_daily_loss,
                 "maxSpreadPoints": self.max_spread_points,
             },
+            "production": {
+                "executionStage": self.control_plane.execution_stage() if self.control_plane else "paper",
+                "globalHalt": self.control_plane.is_halted() if self.control_plane else False,
+                "liveGate": self._production_gate("live")[1] if self.control_plane else "legacy",
+            },
             "kronos": {
                 "enabled": self.kronos_confirm,
                 "available": self.kronos_ok,
@@ -176,6 +183,11 @@ class SymbolEngine:
                 "error": self.kronos_cache["error"],
             },
         }
+
+    def _production_gate(self, mode: str = "live") -> tuple[bool, str]:
+        if not self.control_plane:
+            return True, "legacy"
+        return self.control_plane.trade_gate(self.symbol, mode, autonomous=True)
 
     # ── Engine log helper ─────────────────────────────────────────────────
     def _log(self, entry: dict):
@@ -233,6 +245,11 @@ class SymbolEngine:
     # ── Trailing stop ─────────────────────────────────────────────────────
     async def _trail(self):
         if self.risk.halted:
+            return
+        allowed, reason = self._production_gate("live")
+        if not allowed:
+            self.state["status"] = "policy_blocked"
+            self.state["error"] = reason
             return
         if not self.config["enabled"] or not self.live_enabled or not self._mt5_ready["ok"] or not self.mt5:
             return
@@ -300,6 +317,12 @@ class SymbolEngine:
         )
         if not strong:
             return
+        allowed, gate_reason = self._production_gate("live")
+        if not allowed:
+            self.state["status"] = "policy_blocked"
+            self.state["error"] = gate_reason
+            self._log({"type": "policy_veto", "reason": gate_reason, "bar": bar})
+            return
 
         pyramid_side = 1 if is_long else -1
         kronos_check = self._kronos_agrees(pyramid_side)
@@ -321,9 +344,25 @@ class SymbolEngine:
         )
         sp_points = spread_points(tick.bid, tick.ask, spec)
         decision = self.risk.check(add, len(open_rows), total_volume, sp_points)
-        if not decision["allowed"]:
-            self.state["error"] = "; ".join(decision["reasons"])
-            self._log({"type": "blocked", "reasons": decision["reasons"], "bar": bar})
+        prod_reasons: list[str] = []
+        if self.control_plane:
+            account = await asyncio.to_thread(self.mt5.account_info)
+            symbol_volume = sum(float(o.volume) for o in open_rows if o.symbol == self.symbol)
+            prod_allowed, prod_reasons = self.control_plane.portfolio_gate(
+                requested_lots=add,
+                symbol_lots=symbol_volume,
+                total_lots=total_volume,
+                open_positions=len(open_rows),
+                margin_level=float(getattr(account, "margin_level", 0.0) or 0.0) if account else None,
+                margin_used=float(getattr(account, "margin", 0.0) or 0.0) if account else None,
+                equity=float(getattr(account, "equity", 0.0) or 0.0) if account else None,
+            )
+        else:
+            prod_allowed = True
+        reasons = list(decision["reasons"]) + list(prod_reasons)
+        if not decision["allowed"] or not prod_allowed:
+            self.state["error"] = "; ".join(reasons)
+            self._log({"type": "blocked", "reasons": reasons, "bar": bar})
             return
 
         price = normalize_price(tick.ask if is_long else tick.bid, spec)
@@ -338,20 +377,36 @@ class SymbolEngine:
             "tp": normalize_price(float(pos.tp), spec) if pos.tp else 0.0,
             "deviation": 20,
             "magic": self.magic,
-            "comment": "AuricEngine+",
+            "comment": "AuricV3-Pyramid",
             "type_time": self.mt5.ORDER_TIME_GTC,
             "type_filling": choose_filling(self.mt5, spec),
         }
+        client_order_id = f"auto-pyramid-{self.symbol}-{bar}-{count + 1}"
+        if self.execution_ledger and not self.execution_ledger.reserve(
+            client_order_id, self.symbol, "live", "market", request
+        ):
+            self._log({"type": "duplicate_blocked", "reason": client_order_id, "bar": bar})
+            return
         check = await asyncio.to_thread(self.mt5.order_check, request)
         if check is not None and getattr(check, "retcode", 0) not in (0, getattr(self.mt5, "TRADE_RETCODE_DONE", 10009)):
             self.state["error"] = f"MT5 preflight rejected pyramid: {getattr(check, 'comment', 'unknown')}"
+            if self.execution_ledger:
+                self.execution_ledger.fail(client_order_id, self.state["error"])
             self._log({"type": "rejected", "reason": self.state["error"], "bar": bar})
             return
         result = await asyncio.to_thread(self.mt5.order_send, request)
         if result is None or result.retcode != self.mt5.TRADE_RETCODE_DONE:
             self.state["error"] = f"MT5 rejected pyramid: {getattr(result, 'comment', 'no response')}"
+            if self.execution_ledger:
+                self.execution_ledger.fail(client_order_id, self.state["error"])
             self._log({"type": "rejected", "reason": self.state["error"], "bar": bar})
             return
+        if self.execution_ledger:
+            self.execution_ledger.complete(
+                client_order_id,
+                {"accepted": True, "ticket": result.order, "price": result.price, "kind": "pyramid"},
+                result.order,
+            )
 
         self.state["pyramid_count"] = count + 1
         self.state["trades"] += 1
@@ -503,6 +558,10 @@ class SymbolEngine:
             return
 
         self._log({"type": "signal", "side": side, "reason": reason, "bar": bar})
+        if self.control_plane and self.control_plane.execution_stage() == "shadow":
+            self.state["status"] = "shadow_signal"
+            self._log({"type": "shadow", "side": side, "reason": reason, "bar": bar})
+            return
         if tick is not None:
             price = float(tick.ask if side == 1 else tick.bid)
         else:
@@ -550,6 +609,11 @@ class SymbolEngine:
         if not self.live_enabled:
             self.state["status"] = "paper_only"
             return
+        allowed, gate_reason = self._production_gate("live")
+        if not allowed:
+            self.state["status"] = "policy_blocked"
+            self.state["error"] = gate_reason
+            return
         if not self._mt5_ready["ok"] or not self.mt5:
             self.state["status"] = "mt5_offline"
             return
@@ -590,8 +654,9 @@ class SymbolEngine:
 
         from engine import indicators, signal as _signal
         ind = indicators(candles)
-        open_rows = list(await asyncio.to_thread(self.mt5.positions_get, symbol=self.symbol) or [])
-        ours = [p for p in open_rows if p.magic == self.magic]
+        all_rows = list(await asyncio.to_thread(self.mt5.positions_get) or [])
+        open_rows = [p for p in all_rows if getattr(p, "magic", None) == self.magic]
+        ours = [p for p in open_rows if p.symbol == self.symbol]
         if ours:
             self.state["status"] = "in_position"
             await self._try_pyramid(candles, ind, ours, open_rows, bar)
@@ -619,22 +684,50 @@ class SymbolEngine:
         if account is None or tick is None:
             self.state["error"] = "Account or tick unavailable"
             return
+        tick_ms = int(getattr(tick, "time_msc", 0) or 0)
+        max_tick_age = max(500, int(os.getenv("MAX_LIVE_TICK_AGE_MS", "5000")))
+        if tick_ms and int(time.time() * 1000) - tick_ms > max_tick_age:
+            self.state["status"] = "stale_tick"
+            self.state["error"] = f"Broker tick is stale (> {max_tick_age} ms)"
+            self._log({"type": "blocked", "reason": self.state["error"], "bar": bar})
+            return
 
         price = normalize_price(tick.ask if side == 1 else tick.bid, spec)
         av = ind["av"]
         dist = max(av[-1] * self.config["atr_stop"], minimum_stop_distance(spec))
         stop = normalize_price(price - dist * side, spec)
         target = normalize_price(price + dist * self.config["rr"] * side, spec)
+        configured_risk_pct = float(self.config["risk_pct"])
+        production_risk_cap = (
+            float(self.control_plane.risk_policy()["maxRiskPerTradePct"])
+            if self.control_plane else configured_risk_pct
+        )
+        effective_risk_pct = min(configured_risk_pct, production_risk_cap)
         size = position_size_for_risk(
-            float(account.equity), self.config["risk_pct"], price, stop, spec, self.max_lot
+            float(account.equity), effective_risk_pct, price, stop, spec, self.max_lot
         )
         exposure = sum(float(p.volume) for p in open_rows)
+        symbol_exposure = sum(float(p.volume) for p in ours)
         sp_points = spread_points(tick.bid, tick.ask, spec)
         decision = self.risk.check(size, len(open_rows), exposure, sp_points)
-        if not decision["allowed"]:
-            self.state["error"] = "; ".join(decision["reasons"])
+        prod_reasons: list[str] = []
+        if self.control_plane:
+            prod_allowed, prod_reasons = self.control_plane.portfolio_gate(
+                requested_lots=size,
+                symbol_lots=symbol_exposure,
+                total_lots=exposure,
+                open_positions=len(open_rows),
+                margin_level=float(getattr(account, "margin_level", 0.0) or 0.0),
+                margin_used=float(getattr(account, "margin", 0.0) or 0.0),
+                equity=float(getattr(account, "equity", 0.0) or 0.0),
+            )
+        else:
+            prod_allowed = True
+        reasons = list(decision["reasons"]) + list(prod_reasons)
+        if not decision["allowed"] or not prod_allowed:
+            self.state["error"] = "; ".join(reasons)
             self.state["status"] = "risk_blocked"
-            self._log({"type": "blocked", "reasons": decision["reasons"],
+            self._log({"type": "blocked", "reasons": reasons,
                        "spreadPoints": sp_points, "bar": bar})
             return
 
@@ -649,22 +742,39 @@ class SymbolEngine:
             "tp": target,
             "deviation": 20,
             "magic": self.magic,
-            "comment": "AuricV2-Auto",
+            "comment": "AuricV3-Auto",
             "type_time": self.mt5.ORDER_TIME_GTC,
             "type_filling": choose_filling(self.mt5, spec),
         }
+        client_order_id = f"auto-{self.symbol}-{bar}-{side}"
+        if self.execution_ledger and not self.execution_ledger.reserve(
+            client_order_id, self.symbol, "live", "market", request
+        ):
+            self.state["status"] = "duplicate_blocked"
+            self._log({"type": "duplicate_blocked", "reason": client_order_id, "bar": bar})
+            return
         check = await asyncio.to_thread(self.mt5.order_check, request)
         if check is not None and getattr(check, "retcode", 0) not in (0, getattr(self.mt5, "TRADE_RETCODE_DONE", 10009)):
             self.state["error"] = f"MT5 preflight rejected order: {getattr(check, 'comment', 'unknown')}"
             self.state["status"] = "rejected"
+            if self.execution_ledger:
+                self.execution_ledger.fail(client_order_id, self.state["error"])
             self._log({"type": "rejected", "reason": self.state["error"], "bar": bar})
             return
         result = await asyncio.to_thread(self.mt5.order_send, request)
         if result is None or result.retcode != self.mt5.TRADE_RETCODE_DONE:
             self.state["error"] = f"MT5 rejected order: {getattr(result, 'comment', 'no response')}"
             self.state["status"] = "rejected"
+            if self.execution_ledger:
+                self.execution_ledger.fail(client_order_id, self.state["error"])
             self._log({"type": "rejected", "reason": self.state["error"], "bar": bar})
             return
+        if self.execution_ledger:
+            self.execution_ledger.complete(
+                client_order_id,
+                {"accepted": True, "ticket": result.order, "price": result.price, "kind": "auto"},
+                result.order,
+            )
 
         self.state["trades"] += 1
         self.state["status"] = "in_position"
@@ -687,13 +797,18 @@ class SymbolEngine:
     async def run_engine_loop(self):
         while True:
             try:
-                if self._mt5_ready["ok"] and self.mt5 and self.live_enabled:
-                    await self._trail()
-                    await self._step()
+                if self.control_plane and self.control_plane.is_halted():
+                    self.state["status"] = "halted"
+                    self.state["error"] = self.control_plane.circuit_snapshot().get("reason") or "Global halt"
                 else:
-                    # Auto-live is an independent server gate. When it is off,
-                    # keep the engine useful by running the same strategy in paper mode.
-                    await self._step_yahoo()
+                    live_allowed, _ = self._production_gate("live")
+                    if self._mt5_ready["ok"] and self.mt5 and self.live_enabled and live_allowed:
+                        await self._trail()
+                        await self._step()
+                    else:
+                        # Shadow/paper/assisted stages keep evaluating safely without
+                        # submitting autonomous live orders.
+                        await self._step_yahoo()
             except Exception as exc:
                 self.state["error"] = str(exc)
                 logger.warning("[%s] engine error: %s", self.symbol, exc)

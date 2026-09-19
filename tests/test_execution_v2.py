@@ -1,4 +1,6 @@
 """Auric V2 execution-layer tests: deterministic and broker-independent."""
+import sqlite3
+
 import pytest
 
 from execution_v2 import (
@@ -52,6 +54,13 @@ def test_execution_ledger_is_durable(tmp_path):
     assert row is not None
     assert row["status"] == "filled"
 
+    # Duplicate reservation must not leave a SQLite writer lock behind.
+    other = sqlite3.connect(path, timeout=0.2)
+    other.execute("CREATE TABLE IF NOT EXISTS lock_probe(id INTEGER)")
+    other.execute("INSERT INTO lock_probe(id) VALUES(1)")
+    other.commit()
+    other.close()
+
 
 def test_paper_broker_pending_fill_and_target():
     broker = PaperBroker()
@@ -74,3 +83,35 @@ def test_paper_broker_pending_fill_and_target():
     assert close["reason"] == "Target"
     assert close["pnl"] > 0
     assert broker.positions() == []
+
+
+
+def test_paper_broker_persists_positions_and_pending(tmp_path):
+    path = str(tmp_path / "paper.db")
+    spec = fallback_spec("XAUUSD")
+    first = PaperBroker(path)
+    market = first.place(
+        symbol="XAUUSD", side="buy", lots=0.1, order_type="market",
+        bid=5000.0, ask=5000.2, entry_price=None,
+        stop_loss=4990.0, take_profit=5020.0,
+        client_order_id="paper-persist-market", spec=spec,
+    )
+    pending = first.place(
+        symbol="XAUUSD", side="buy", lots=0.1, order_type="limit",
+        bid=5000.0, ask=5000.2, entry_price=4995.0,
+        stop_loss=4990.0, take_profit=5010.0,
+        client_order_id="paper-persist-limit", spec=spec,
+    )
+
+    second = PaperBroker(path)
+    assert any(p["ticket"] == market["ticket"] for p in second.positions())
+    assert any(o["ticket"] == pending["ticket"] for o in second.pending())
+
+    second.protect_position(market["ticket"], breakeven=True)
+    third = PaperBroker(path)
+    restored = next(p for p in third.positions() if p["ticket"] == market["ticket"])
+    assert restored["sl"] == pytest.approx(restored["entry"])
+
+    third.cancel_pending(pending["ticket"])
+    fourth = PaperBroker(path)
+    assert fourth.pending() == []

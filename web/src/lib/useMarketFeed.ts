@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Quote } from './types'
+import { getAuthKey } from './api'
 
 function wsUrl(): string {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  return `${proto}://${location.host}/ws/market`
+  const url = new URL(`${proto}://${location.host}/ws/market`)
+  const token = getAuthKey()
+  if (token) url.searchParams.set('token', token)
+  return url.toString()
 }
 
 export interface UseMarketFeedResult {
@@ -16,9 +20,16 @@ export function useMarketFeed(intervalMs = 4000): UseMarketFeedResult {
   const [tick, setTick] = useState<Quote | null>(null)
   const [ticks, setTicks] = useState<Record<string, Quote>>({})
   const [status, setStatus] = useState<UseMarketFeedResult['status']>('connecting')
+  const [credentialVersion, setCredentialVersion] = useState(0)
   const socketRef = useRef<WebSocket | null>(null)
   const retryRef = useRef(1000)
   const lastTickRef = useRef(0)
+
+  useEffect(() => {
+    const onCredentialsChanged = () => setCredentialVersion((v) => v + 1)
+    window.addEventListener('auric-credentials-changed', onCredentialsChanged)
+    return () => window.removeEventListener('auric-credentials-changed', onCredentialsChanged)
+  }, [])
 
   useEffect(() => {
     let closed = false
@@ -72,7 +83,7 @@ export function useMarketFeed(intervalMs = 4000): UseMarketFeedResult {
       window.clearInterval(pollId)
       socketRef.current?.close()
     }
-  }, [intervalMs])
+  }, [intervalMs, credentialVersion])
 
   return { tick, ticks, status }
 }

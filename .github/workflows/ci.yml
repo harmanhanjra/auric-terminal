@@ -20,9 +20,12 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: pip install -r requirements-dev.txt
-      # Kronos contains its own heavyweight upstream research/model tests.
-      # The application CI installs and verifies only the API/engine test suite.
-      - run: pytest -q tests
+      - name: Compile Python sources
+        run: python -m compileall -q server.py engine.py execution_v2.py production_control.py multi_engine.py brain_agent.py kronos_engine.py
+      - name: Audit Python dependencies
+        run: pip-audit -r requirements.txt
+      - name: Backend tests
+        run: pytest -q tests
 
   web:
     runs-on: ubuntu-latest
@@ -41,3 +44,12 @@ jobs:
       - run: npm audit --audit-level=high
       - run: npm run lint
       - run: npm run build
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [backend, web]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build production container
+        run: docker build -t auric-terminal:ci .

@@ -11,7 +11,9 @@ import json
 import logging
 import os
 import random
+import sqlite3
 import time
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, time as dtime
 from pathlib import Path
@@ -19,7 +21,7 @@ from typing import Literal
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from engine import (STRATEGIES, SIZERS, Journal, RiskManager, atr, backtest,
@@ -31,24 +33,38 @@ from execution_v2 import (
     fallback_spec,
     normalize_price,
     normalize_volume,
+    minimum_stop_distance,
     position_size_for_risk,
     risk_per_lot,
     spec_from_info,
     spec_payload,
     spread_points,
 )
+from production_control import Principal, ProductionControlPlane
 
 logger = logging.getLogger("auric")
 
+def _secret_env(name: str, default: str = "") -> str:
+    """Read a secret from NAME_FILE when present, otherwise NAME."""
+    file_path = os.getenv(f"{name}_FILE", "").strip()
+    if file_path:
+        try:
+            return Path(file_path).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise RuntimeError(f"Unable to read {name}_FILE") from exc
+    return os.getenv(name, default)
+
 ROOT = Path(__file__).parent
+DB_PATH = Path(os.getenv("AURIC_DB_PATH", str(ROOT / "auric.db"))).expanduser()
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 SYMBOL = os.getenv("MT5_SYMBOL", "XAUUSD")
 TD_SYMBOL = os.getenv("TWELVE_DATA_SYMBOL", "XAU/USD")
-TD_KEY = os.getenv("TWELVE_DATA_API_KEY", "")
+TD_KEY = _secret_env("TWELVE_DATA_API_KEY")
 SOURCE = os.getenv("MARKET_DATA_SOURCE", "auto").lower()
 LIVE_ENABLED = os.getenv("ENABLE_LIVE_TRADING", "false").lower() == "true"
 # Manual live execution and autonomous live execution are deliberately separate.
 AUTO_LIVE_ENABLED = os.getenv("ENABLE_AUTO_LIVE_TRADING", "false").lower() == "true"
-LIVE_API_KEY = os.getenv("AURIC_LIVE_API_KEY", "")
+LIVE_API_KEY = _secret_env("AURIC_LIVE_API_KEY")
 MAX_LOT = float(os.getenv("MAX_LOT", "1.0"))
 MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "500.0"))
 MAX_SPREAD_POINTS = float(os.getenv("MAX_SPREAD_POINTS", "80"))
@@ -112,9 +128,29 @@ def _require_live_auth(request: Request) -> None:
     supplied = request.headers.get("x-auric-key", "")
     if not supplied or not hmac.compare_digest(supplied, LIVE_API_KEY):
         raise HTTPException(401, "Invalid or missing live execution key")
-journal = Journal(str(ROOT / "auric.db"))
-execution_ledger = ExecutionLedger(str(ROOT / "auric.db"))
-paper_broker = PaperBroker()
+
+def _request_principal(request: Request) -> Principal:
+    principal = getattr(request.state, "principal", None)
+    if principal is not None:
+        return principal
+    token = request.headers.get("x-auric-auth", "")
+    if not token:
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            token = auth[7:].strip()
+    return control.authenticate(token or None)
+
+
+def _require_role(request: Request, minimum_role: str) -> Principal:
+    principal = _request_principal(request)
+    if not control.allowed(principal, minimum_role):
+        raise HTTPException(403, f"{minimum_role} role required")
+    return principal
+
+journal = Journal(str(DB_PATH))
+execution_ledger = ExecutionLedger(str(DB_PATH))
+paper_broker = PaperBroker(str(DB_PATH))
+control = ProductionControlPlane(str(DB_PATH))
 
 MAGIC = 144021
 ENGINE_CONFIG = {
@@ -155,7 +191,7 @@ KRONOS_CACHE = {
 }
 
 # Telegram notification config
-TG_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TG_BOT_TOKEN = _secret_env("TELEGRAM_BOT_TOKEN")
 TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 async def tg_notify(text: str):
@@ -197,6 +233,31 @@ class RiskPreviewRequest(BaseModel):
     target: float | None = Field(default=None, gt=0)
     risk_pct: float = Field(default=0.5, gt=0, le=10)
     risk_amount: float | None = Field(default=None, gt=0)
+
+
+class ExecutionStageRequest(BaseModel):
+    stage: Literal["shadow", "paper", "assisted", "auto"]
+
+
+class NewsEventRequest(BaseModel):
+    title: str = Field(min_length=2, max_length=300)
+    impact: Literal["low", "medium", "high"] = "high"
+    start_ms: int
+    end_ms: int
+    symbols: list[str] = Field(default_factory=lambda: ["ALL"])
+    source: str = Field(default="manual", max_length=80)
+
+
+class ProtectPositionRequest(BaseModel):
+    mode: Literal["paper", "live"] = "paper"
+    sl: float | None = Field(default=None, gt=0)
+    tp: float | None = Field(default=None, gt=0)
+    breakeven: bool = False
+
+
+class ClosePositionRequest(BaseModel):
+    mode: Literal["paper", "live"] = "paper"
+    lots: float | None = Field(default=None, gt=0)
 
 class BacktestRequest(BaseModel):
     candles: list[dict]
@@ -248,8 +309,9 @@ async def init_mt5() -> bool:
     kwargs = {}
     if os.getenv("MT5_LOGIN"):
         kwargs["login"] = int(os.environ["MT5_LOGIN"])
-    if os.getenv("MT5_PASSWORD"):
-        kwargs["password"] = os.environ["MT5_PASSWORD"]
+    mt5_password = _secret_env("MT5_PASSWORD")
+    if mt5_password:
+        kwargs["password"] = mt5_password
     if os.getenv("MT5_SERVER"):
         kwargs["server"] = os.environ["MT5_SERVER"]
     mt5_ready = await asyncio.to_thread(mt5.initialize, **kwargs)
@@ -817,6 +879,194 @@ async def engine_loop():
             ENGINE_STATE["error"] = str(exc)
         await asyncio.sleep(3)
 
+def _backup_database_sync() -> dict:
+    backup_dir = Path(os.getenv("AURIC_BACKUP_DIR", str(DB_PATH.parent / "backups"))).expanduser()
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    dest_path = backup_dir / f"auric-{stamp}.db"
+    source = sqlite3.connect(str(DB_PATH))
+    dest = sqlite3.connect(str(dest_path))
+    try:
+        source.backup(dest)
+    finally:
+        dest.close()
+        source.close()
+
+    retention = max(1, int(os.getenv("BACKUP_RETENTION", "20")))
+    backups = sorted(backup_dir.glob("auric-*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for old in backups[retention:]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+    return {
+        "ok": True,
+        "file": dest_path.name,
+        "size": dest_path.stat().st_size,
+        "timestamp": int(time.time() * 1000),
+    }
+
+
+async def backup_database() -> dict:
+    return await asyncio.to_thread(_backup_database_sync)
+
+
+async def backup_loop():
+    interval = max(300, int(os.getenv("BACKUP_INTERVAL_SECONDS", "21600")))
+    while True:
+        await asyncio.sleep(interval)
+        if os.getenv("BACKUP_ENABLED", "true").lower() != "true":
+            continue
+        try:
+            result = await backup_database()
+            logger.info("Database backup completed: %s", result["file"])
+        except Exception as exc:
+            logger.warning("Database backup failed: %s", exc)
+
+
+async def sync_news_feed() -> dict:
+    url = os.getenv("NEWS_FEED_URL", "").strip()
+    if not url:
+        return {"configured": False, "ingested": 0}
+    headers = {"Accept": "application/json"}
+    api_key = _secret_env("NEWS_FEED_API_KEY").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.get(url, headers=headers)
+        response.raise_for_status()
+        payload = response.json()
+    events = payload.get("events", payload) if isinstance(payload, dict) else payload
+    if not isinstance(events, list):
+        raise ValueError("Normalized news feed must return a list or {events:[...]}")
+    ingested = 0
+    source = os.getenv("NEWS_FEED_SOURCE", "normalized-feed")
+    for item in events[:1000]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            control.add_news(
+                title=str(item["title"]),
+                impact=str(item.get("impact", "high")).lower(),
+                start_ms=int(item["start_ms"]),
+                end_ms=int(item["end_ms"]),
+                symbols=[str(x) for x in item.get("symbols", ["ALL"])],
+                source=str(item.get("source", source)),
+            )
+            ingested += 1
+        except (KeyError, TypeError, ValueError):
+            continue
+    return {"configured": True, "ingested": ingested, "source": source}
+
+
+async def news_feed_loop():
+    interval = max(60, int(os.getenv("NEWS_FEED_POLL_SECONDS", "300")))
+    while True:
+        if os.getenv("NEWS_FEED_URL", "").strip():
+            try:
+                result = await sync_news_feed()
+                if result.get("ingested"):
+                    logger.info("News feed sync ingested %s events", result["ingested"])
+            except Exception as exc:
+                logger.warning("News feed sync failed: %s", exc)
+        await asyncio.sleep(interval)
+
+
+async def reconcile_once() -> dict:
+    summary: dict = {
+        "mt5Connected": bool(mt5_ready and mt5),
+        "livePositions": 0,
+        "livePending": 0,
+        "paperPositions": len(paper_broker.positions()),
+        "paperPending": len(paper_broker.pending()),
+        "positionTickets": [],
+        "pendingTickets": [],
+    }
+    if mt5_ready and mt5:
+        day_start = datetime.combine(datetime.now().date(), dtime.min)
+        deals = list(await asyncio.to_thread(mt5.history_deals_get, day_start, datetime.now()) or [])
+        global_realized = sum(
+            float(getattr(d, "profit", 0.0) or 0.0)
+            + float(getattr(d, "commission", 0.0) or 0.0)
+            + float(getattr(d, "swap", 0.0) or 0.0)
+            + float(getattr(d, "fee", 0.0) or 0.0)
+            for d in deals
+            if getattr(d, "magic", None) == MAGIC
+        )
+        risk.realized = global_realized
+        summary["todayNetRealized"] = round(global_realized, 2)
+        positions = [
+            p for p in (list(await asyncio.to_thread(mt5.positions_get) or []))
+            if getattr(p, "magic", None) == MAGIC
+        ]
+        pending = [
+            p for p in (list(await asyncio.to_thread(mt5.orders_get) or []))
+            if getattr(p, "magic", None) == MAGIC
+        ]
+        position_tickets = {int(p.ticket) for p in positions}
+        pending_tickets = {int(p.ticket) for p in pending}
+        tracked_tickets = execution_ledger.broker_tickets("live")
+        broker_tickets = position_tickets | pending_tickets
+        untracked = sorted(broker_tickets - tracked_tickets)
+        summary.update({
+            "livePositions": len(positions),
+            "livePending": len(pending),
+            "positionTickets": sorted(position_tickets),
+            "pendingTickets": sorted(pending_tickets),
+            "trackedBrokerTickets": len(tracked_tickets),
+            "untrackedBrokerTickets": untracked,
+        })
+    status = "warning" if summary.get("untrackedBrokerTickets") else "ok"
+    control.record_reconciliation(status, summary)
+    return {"status": status, **summary}
+
+
+async def reconciliation_loop():
+    interval = max(5, int(os.getenv("RECONCILE_INTERVAL_SECONDS", "15")))
+    while True:
+        try:
+            summary = await reconcile_once()
+            auto_active = AUTO_LIVE_ENABLED and control.execution_stage() == "auto"
+            if summary.get("todayNetRealized", 0.0) <= -MAX_DAILY_LOSS and not control.is_halted():
+                control.halt(
+                    f"Global Auric daily loss limit reached: {summary['todayNetRealized']:.2f}"
+                )
+                risk.kill()
+                for eng in ENGINES.values():
+                    eng.risk.kill()
+            if auto_active and not control.is_halted():
+                if (
+                    os.getenv("HALT_ON_BROKER_DISCONNECT", "true").lower() == "true"
+                    and not summary.get("mt5Connected")
+                ):
+                    control.halt("MT5 broker connection lost while AUTO stage was active")
+                    risk.kill()
+                    for eng in ENGINES.values():
+                        eng.risk.kill()
+                elif (
+                    os.getenv("HALT_ON_RECONCILIATION_DRIFT", "true").lower() == "true"
+                    and summary.get("untrackedBrokerTickets")
+                ):
+                    tickets = summary["untrackedBrokerTickets"]
+                    control.halt(f"Reconciliation drift detected for broker tickets: {tickets[:10]}")
+                    risk.kill()
+                    for eng in ENGINES.values():
+                        eng.risk.kill()
+        except Exception as exc:
+            control.record_reconciliation("error", {"error": str(exc)})
+            if (
+                AUTO_LIVE_ENABLED
+                and control.execution_stage() == "auto"
+                and os.getenv("HALT_ON_RECONCILIATION_ERROR", "true").lower() == "true"
+            ):
+                control.halt(f"Reconciliation loop error: {exc}")
+                risk.kill()
+                for eng in ENGINES.values():
+                    eng.risk.kill()
+            logger.warning("Reconciliation failed: %s", exc)
+        await asyncio.sleep(interval)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global feed_task, engine_task, kronos_task, mt5_ready
@@ -850,43 +1100,105 @@ async def lifespan(_: FastAPI):
             kronos_ok=KRONOS_OK,
             mt5_timeframes=MT5_TIMEFRAMES,
             engine_mod=None,
+            control_plane=control,
+            execution_ledger=execution_ledger,
         )
         ENGINES[sym] = eng
         # Start background tasks for every symbol; enable/disable only gates
         # strategy execution and never destroys the task lifecycle.
         eng.start()
 
+    reconcile_task = asyncio.create_task(reconciliation_loop())
+    backup_task = asyncio.create_task(backup_loop())
+    news_task = asyncio.create_task(news_feed_loop())
     logger.info(
-        "Auric V2 engines started: %s | manual_live=%s | auto_live=%s",
-        list(ENGINES.keys()), LIVE_ENABLED, AUTO_LIVE_ENABLED,
+        "Auric V3 engines started: %s | manual_live=%s | auto_live=%s | stage=%s",
+        list(ENGINES.keys()), LIVE_ENABLED, AUTO_LIVE_ENABLED, control.execution_stage(),
     )
     yield
 
     if feed_task:
         feed_task.cancel()
+    reconcile_task.cancel()
+    backup_task.cancel()
+    news_task.cancel()
     sync_task.cancel()
     for eng in ENGINES.values():
         eng.stop()
     if mt5_ready and mt5:
         mt5.shutdown()
 
-app = FastAPI(title="AuricTerminal Gateway", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="AuricTerminal Gateway", version="3.0.0", lifespan=lifespan)
 
 
 @app.middleware("http")
-async def security_headers(request, call_next):
-    """Defense-in-depth response headers. CSP is loose because the terminal
-    ships a self-contained UI; external assets are limited to Google Fonts."""
-    response = await call_next(request)
+async def production_middleware(request: Request, call_next):
+    started = time.perf_counter()
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+    token = request.headers.get("x-auric-auth", "")
+    if not token:
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            token = auth[7:].strip()
+    principal = control.authenticate(token or None)
+    request.state.principal = principal
+    request.state.request_id = request_id
+
+    public_paths = {"/api/health", "/api/readiness"}
+    if request.url.path.startswith("/api/") and request.url.path not in public_paths:
+        if control.auth_required and not control.allowed(principal, "viewer"):
+            return JSONResponse(
+                {"detail": "Authentication required", "requestId": request_id},
+                status_code=401,
+                headers={"X-Request-ID": request_id},
+            )
+        identity = principal.name if principal.authenticated else (request.client.host if request.client else "local")
+        allowed, retry_after = control.rate_allowed(identity, request.method, request.url.path)
+        if not allowed:
+            return JSONResponse(
+                {"detail": "Rate limit exceeded", "requestId": request_id},
+                status_code=429,
+                headers={"Retry-After": str(retry_after), "X-Request-ID": request_id},
+            )
+
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+    except Exception:
+        if request.method not in {"GET", "HEAD", "OPTIONS"} and request.url.path.startswith("/api/"):
+            control.audit(
+                request_id=request_id, principal=principal, action=request.method,
+                path=request.url.path, status=500, detail={"exception": True},
+            )
+        raise
+
+    if request.method not in {"GET", "HEAD", "OPTIONS"} and request.url.path.startswith("/api/"):
+        control.audit(
+            request_id=request_id,
+            principal=principal,
+            action=request.method,
+            path=request.url.path,
+            status=status,
+        )
+
+    response.headers.setdefault("X-Request-ID", request_id)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
     response.headers.setdefault(
         "Content-Security-Policy",
         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' "
         "https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; "
         "img-src 'self' data:; connect-src 'self' ws: wss:; "
-        "frame-ancestors 'none'")
+        "frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    logger.info(
+        "request_id=%s method=%s path=%s status=%s elapsed_ms=%.1f actor=%s",
+        request_id, request.method, request.url.path, status, elapsed_ms, principal.name,
+    )
     return response
 
 
@@ -904,12 +1216,190 @@ async def terminal():
 async def health():
     return {
         "ok": True,
+        "version": "3.0.0",
         "source": latest.get("source"),
         "liveTrading": LIVE_ENABLED,
         "autoLiveTrading": AUTO_LIVE_ENABLED,
+        "executionStage": control.execution_stage(),
+        "halted": control.is_halted(),
         "symbol": SYMBOL,
         "timestamp": int(time.time() * 1000),
     }
+
+
+@app.get("/api/readiness")
+async def readiness():
+    source = latest.get("source") if isinstance(latest, dict) else None
+    feed_fresh = bool(latest.get("timestamp")) and int(time.time() * 1000) - int(latest.get("timestamp", 0)) < 15000
+    checks = {
+        "database": True,
+        "marketFeed": bool(feed_fresh),
+        "mt5": bool(mt5_ready),
+        "authConfigured": (not control.auth_required) or control.status()["configuredPrincipals"] > 0,
+        "liveKeyConfigured": (not LIVE_ENABLED and not AUTO_LIVE_ENABLED) or bool(LIVE_API_KEY),
+    }
+    ready = checks["database"] and checks["marketFeed"] and checks["authConfigured"] and checks["liveKeyConfigured"]
+    return {
+        "ready": ready,
+        "checks": checks,
+        "source": source,
+        "production": control.status(),
+        "timestamp": int(time.time() * 1000),
+    }
+
+
+@app.get("/api/system/status")
+async def system_status(request: Request):
+    _require_role(request, "viewer")
+    return {
+        **control.status(),
+        "version": "3.0.0",
+        "mt5Connected": bool(mt5_ready and mt5),
+        "manualLiveEnabled": LIVE_ENABLED,
+        "autoLiveEnabled": AUTO_LIVE_ENABLED,
+        "trackedSymbols": ALL_SYMBOLS,
+    }
+
+
+@app.get("/api/auth/whoami")
+async def whoami(request: Request):
+    principal = _request_principal(request)
+    if control.auth_required and not control.allowed(principal, "viewer"):
+        raise HTTPException(401, "Authentication required")
+    return {
+        "name": principal.name,
+        "role": principal.role,
+        "authenticated": principal.authenticated,
+        "authRequired": control.auth_required,
+    }
+
+
+@app.get("/api/metrics")
+async def runtime_metrics(request: Request):
+    _require_role(request, "viewer")
+    now_ms = int(time.time() * 1000)
+    feed_ts = int(latest.get("timestamp", 0) or 0) if isinstance(latest, dict) else 0
+    paper_positions = paper_broker.positions()
+    paper_pending = paper_broker.pending()
+    live_positions = live_pending = 0
+    if mt5_ready and mt5:
+        live_positions = len([
+            p for p in (list(await asyncio.to_thread(mt5.positions_get) or []))
+            if getattr(p, "magic", None) == MAGIC
+        ])
+        live_pending = len([
+            p for p in (list(await asyncio.to_thread(mt5.orders_get) or []))
+            if getattr(p, "magic", None) == MAGIC
+        ])
+    return {
+        "timestamp": now_ms,
+        "feedAgeMs": max(0, now_ms - feed_ts) if feed_ts else None,
+        "websocketClients": len(clients),
+        "paperPositions": len(paper_positions),
+        "paperPending": len(paper_pending),
+        "livePositions": live_positions,
+        "livePending": live_pending,
+        "executionStage": control.execution_stage(),
+        "halted": control.is_halted(),
+        "engineStates": {sym: ENGINES[sym].state.get("status") for sym in ENGINES},
+        "lastReconciliation": control.last_reconciliation(),
+    }
+
+
+@app.post("/api/system/backup")
+async def backup_now(request: Request):
+    _require_role(request, "admin")
+    return await backup_database()
+
+
+@app.post("/api/news/sync")
+async def sync_news_now(request: Request):
+    _require_role(request, "admin")
+    try:
+        return await sync_news_feed()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(502, f"News feed sync failed: {exc}") from exc
+
+
+@app.post("/api/system/stage")
+async def set_execution_stage(req: ExecutionStageRequest, request: Request):
+    principal = _require_role(request, "admin")
+    if req.stage == "auto":
+        blockers: list[str] = []
+        if not AUTO_LIVE_ENABLED:
+            blockers.append("ENABLE_AUTO_LIVE_TRADING is false")
+        if not LIVE_API_KEY:
+            blockers.append("AURIC_LIVE_API_KEY is not configured")
+        if not mt5_ready or not mt5:
+            blockers.append("MT5 broker is not connected")
+        if control.is_halted():
+            blockers.append("global circuit is halted")
+        if (
+            os.getenv("REQUIRE_AUTH_FOR_AUTO", "true").lower() == "true"
+            and (not control.auth_required or control.status()["configuredPrincipals"] <= 0)
+        ):
+            blockers.append("production RBAC is not enabled/configured")
+        if blockers:
+            raise HTTPException(409, "AUTO promotion blocked: " + "; ".join(blockers))
+        recon = await reconcile_once()
+        if recon.get("untrackedBrokerTickets"):
+            raise HTTPException(409, "AUTO promotion blocked by reconciliation drift")
+    stage = control.set_execution_stage(req.stage)
+    control.audit(
+        request_id=getattr(request.state, "request_id", ""),
+        principal=principal, action="stage_change", path="/api/system/stage", status=200,
+        detail={"stage": stage},
+    )
+    return {"ok": True, "executionStage": stage}
+
+
+@app.post("/api/system/resume")
+async def resume_system(request: Request):
+    _require_role(request, "admin")
+    control.resume()
+    risk.halted = False
+    for eng in ENGINES.values():
+        eng.reset_risk()
+    return {"ok": True, "circuit": control.circuit_snapshot()}
+
+
+@app.get("/api/audit")
+async def audit_log(request: Request, limit: int = 200):
+    _require_role(request, "admin")
+    return {"events": control.audit_rows(limit)}
+
+
+@app.get("/api/news/events")
+async def news_events(request: Request, limit: int = 100):
+    _require_role(request, "viewer")
+    return {"events": control.list_news(limit)}
+
+
+@app.post("/api/news/events")
+async def add_news_event(req: NewsEventRequest, request: Request):
+    _require_role(request, "admin")
+    try:
+        event_id = control.add_news(
+            title=req.title, impact=req.impact, start_ms=req.start_ms, end_ms=req.end_ms,
+            symbols=req.symbols, source=req.source,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"ok": True, "id": event_id}
+
+
+@app.post("/api/news/events/{event_id}/disable")
+async def disable_news_event(event_id: int, request: Request):
+    _require_role(request, "admin")
+    if not control.set_news_enabled(event_id, False):
+        raise HTTPException(404, "News event not found")
+    return {"ok": True}
+
+
+@app.post("/api/reconcile")
+async def reconcile_now(request: Request):
+    _require_role(request, "admin")
+    return await reconcile_once()
 
 @app.get("/api/quote")
 async def quote():
@@ -1079,6 +1569,7 @@ async def symbol_metrics(symbol: str):
 
 @app.post("/api/symbols/{symbol}/start")
 async def symbol_start(symbol: str, request: Request):
+    _require_role(request, "trader")
     sym = symbol.upper()
     if sym not in ENGINES:
         raise HTTPException(404, f"Symbol {sym} not tracked")
@@ -1089,7 +1580,8 @@ async def symbol_start(symbol: str, request: Request):
 
 
 @app.post("/api/symbols/{symbol}/stop")
-async def symbol_stop(symbol: str):
+async def symbol_stop(symbol: str, request: Request):
+    _require_role(request, "trader")
     sym = symbol.upper()
     if sym not in ENGINES:
         raise HTTPException(404, f"Symbol {sym} not tracked")
@@ -1104,6 +1596,7 @@ async def all_kronos():
 
 @app.post("/api/engine/start")
 async def engine_start(request: Request):
+    _require_role(request, "trader")
     if AUTO_LIVE_ENABLED:
         _require_live_auth(request)
     if SYMBOL not in ENGINES:
@@ -1113,14 +1606,16 @@ async def engine_start(request: Request):
 
 
 @app.post("/api/engine/stop")
-async def engine_stop():
+async def engine_stop(request: Request):
+    _require_role(request, "trader")
     if SYMBOL in ENGINES:
         ENGINES[SYMBOL].disable()
     return engine_snapshot()
 
 
 @app.post("/api/engine/reset")
-async def engine_reset():
+async def engine_reset(request: Request):
+    _require_role(request, "admin")
     risk.halted = False
     for eng in ENGINES.values():
         eng.reset_risk()
@@ -1174,15 +1669,177 @@ async def pending_orders(symbol: str | None = None, mode: Literal["paper", "live
         for p in rows:
             if getattr(p, "magic", None) != MAGIC or (sym and p.symbol != sym):
                 continue
+            buy_types = {
+                getattr(mt5, "ORDER_TYPE_BUY_LIMIT", -1),
+                getattr(mt5, "ORDER_TYPE_BUY_STOP", -2),
+                getattr(mt5, "ORDER_TYPE_BUY_STOP_LIMIT", -3),
+            }
+            stop_types = {
+                getattr(mt5, "ORDER_TYPE_BUY_STOP", -2),
+                getattr(mt5, "ORDER_TYPE_SELL_STOP", -4),
+                getattr(mt5, "ORDER_TYPE_BUY_STOP_LIMIT", -3),
+                getattr(mt5, "ORDER_TYPE_SELL_STOP_LIMIT", -5),
+            }
             out.append({
-                "ticket": p.ticket, "symbol": p.symbol, "lots": p.volume_current,
+                "ticket": p.ticket, "symbol": p.symbol,
+                "side": "buy" if p.type in buy_types else "sell",
+                "orderType": "stop" if p.type in stop_types else "limit",
+                "lots": p.volume_current,
                 "entry": p.price_open, "sl": p.sl, "tp": p.tp, "mode": "live",
             })
     return {"orders": out}
 
 
+@app.post("/api/positions/{ticket}/close")
+async def close_position(ticket: int, req: ClosePositionRequest, request: Request):
+    _require_role(request, "trader")
+    if req.mode == "paper":
+        try:
+            result = paper_broker.close_position(ticket, req.lots)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        journal.add(
+            mode="paper", symbol=result["symbol"], side="system",
+            lots=result["closedLots"], entry=result["entry"], exit=result["exit"],
+            pnl=result["pnl"], strategy="manual", reason="Paper manual close",
+            raw={"ticket": ticket},
+        )
+        return {"ok": True, "mode": "paper", "position": result}
+
+    if not LIVE_ENABLED:
+        raise HTTPException(403, "Manual live execution is disabled")
+    _require_live_auth(request)
+    if not mt5_ready or not mt5:
+        raise HTTPException(503, "MT5 terminal is not connected")
+
+    rows = list(await asyncio.to_thread(mt5.positions_get) or [])
+    position = next((p for p in rows if int(p.ticket) == ticket and p.magic == MAGIC), None)
+    if position is None:
+        raise HTTPException(404, "Auric live position not found")
+    info = await asyncio.to_thread(mt5.symbol_info, position.symbol)
+    tick = await asyncio.to_thread(mt5.symbol_info_tick, position.symbol)
+    if info is None or tick is None:
+        raise HTTPException(503, "Broker symbol/tick unavailable")
+    spec = spec_from_info(position.symbol, info)
+    raw_lots = float(position.volume if req.lots is None else req.lots)
+    if raw_lots <= 0 or raw_lots > float(position.volume):
+        raise HTTPException(422, "Invalid close volume")
+    lots = normalize_volume(raw_lots, spec)
+    is_buy = position.type == mt5.POSITION_TYPE_BUY
+    close_request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": position.symbol,
+        "position": position.ticket,
+        "volume": lots,
+        "type": mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
+        "price": normalize_price(tick.bid if is_buy else tick.ask, spec),
+        "deviation": 30,
+        "magic": MAGIC,
+        "comment": "AuricV3 close",
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": choose_filling(mt5, spec),
+    }
+    check = await asyncio.to_thread(mt5.order_check, close_request)
+    valid = {0, getattr(mt5, "TRADE_RETCODE_DONE", 10009)}
+    if check is not None and getattr(check, "retcode", 0) not in valid:
+        raise HTTPException(422, f"MT5 preflight rejected close: {getattr(check, 'comment', 'unknown')}")
+    result = await asyncio.to_thread(mt5.order_send, close_request)
+    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+        raise HTTPException(502, f"MT5 rejected close: {getattr(result, 'comment', 'unknown')}")
+    journal.add(
+        mode="live", symbol=position.symbol, side="system", lots=lots,
+        entry=position.price_open, exit=getattr(result, "price", close_request["price"]),
+        pnl=None, strategy="manual", reason="Live manual close",
+        raw={"ticket": ticket},
+    )
+    return {"ok": True, "mode": "live", "ticket": ticket, "closedLots": lots, "deal": getattr(result, "deal", None)}
+
+
+@app.post("/api/positions/{ticket}/protect")
+async def protect_position(ticket: int, req: ProtectPositionRequest, request: Request):
+    _require_role(request, "trader")
+    if not req.breakeven and req.sl is None and req.tp is None:
+        raise HTTPException(422, "Provide sl, tp or breakeven=true")
+    if req.mode == "paper":
+        try:
+            position = paper_broker.protect_position(
+                ticket, sl=req.sl, tp=req.tp, breakeven=req.breakeven
+            )
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return {"ok": True, "mode": "paper", "position": position}
+
+    if not LIVE_ENABLED:
+        raise HTTPException(403, "Manual live execution is disabled")
+    _require_live_auth(request)
+    if not mt5_ready or not mt5:
+        raise HTTPException(503, "MT5 terminal is not connected")
+    rows = list(await asyncio.to_thread(mt5.positions_get) or [])
+    position = next((p for p in rows if int(p.ticket) == ticket and p.magic == MAGIC), None)
+    if position is None:
+        raise HTTPException(404, "Auric live position not found")
+    info = await asyncio.to_thread(mt5.symbol_info, position.symbol)
+    if info is None:
+        raise HTTPException(503, "Broker symbol unavailable")
+    spec = spec_from_info(position.symbol, info)
+    sl = float(position.price_open) if req.breakeven else (req.sl if req.sl is not None else float(position.sl or 0.0))
+    tp = req.tp if req.tp is not None else float(position.tp or 0.0)
+    modify_request = {
+        "action": mt5.TRADE_ACTION_SLTP,
+        "symbol": position.symbol,
+        "position": position.ticket,
+        "sl": normalize_price(sl, spec) if sl else 0.0,
+        "tp": normalize_price(tp, spec) if tp else 0.0,
+        "magic": MAGIC,
+        "comment": "AuricV3 protect",
+    }
+    result = await asyncio.to_thread(mt5.order_send, modify_request)
+    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+        raise HTTPException(502, f"MT5 rejected protection update: {getattr(result, 'comment', 'unknown')}")
+    return {
+        "ok": True, "mode": "live", "ticket": ticket,
+        "sl": modify_request["sl"], "tp": modify_request["tp"],
+    }
+
+
+@app.delete("/api/pending/{ticket}")
+async def cancel_pending(ticket: int, request: Request, mode: Literal["paper", "live"] = "paper"):
+    _require_role(request, "trader")
+    if mode == "paper":
+        try:
+            order = paper_broker.cancel_pending(ticket)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return {"ok": True, "mode": "paper", "order": order}
+
+    if not LIVE_ENABLED:
+        raise HTTPException(403, "Manual live execution is disabled")
+    _require_live_auth(request)
+    if not mt5_ready or not mt5:
+        raise HTTPException(503, "MT5 terminal is not connected")
+    rows = list(await asyncio.to_thread(mt5.orders_get) or [])
+    pending = next((p for p in rows if int(p.ticket) == ticket and p.magic == MAGIC), None)
+    if pending is None:
+        raise HTTPException(404, "Auric live pending order not found")
+    result = await asyncio.to_thread(
+        mt5.order_send, {"action": mt5.TRADE_ACTION_REMOVE, "order": pending.ticket}
+    )
+    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+        raise HTTPException(502, f"MT5 rejected cancellation: {getattr(result, 'comment', 'unknown')}")
+    return {"ok": True, "mode": "live", "ticket": ticket}
+
+
+@app.get("/api/risk/policy")
+async def risk_policy(request: Request):
+    _require_role(request, "viewer")
+    return control.risk_policy()
+
+
 @app.post("/api/risk/reset")
-async def reset_risk():
+async def reset_risk(request: Request):
+    _require_role(request, "admin")
     risk.halted = False
     for eng in ENGINES.values():
         eng.reset_risk()
@@ -1382,6 +2039,10 @@ async def brain_setup(symbol: str = SYMBOL, interval: str = "M15", lookback: int
 
 @app.websocket("/ws/market")
 async def ws_market(ws: WebSocket):
+    principal = control.authenticate(ws.query_params.get("token"))
+    if control.auth_required and not control.allowed(principal, "viewer"):
+        await ws.close(code=4401)
+        return
     await ws.accept()
     clients.add(ws)
     primary = latest_by_symbol.get(SYMBOL)
@@ -1402,6 +2063,7 @@ async def ws_market(ws: WebSocket):
 
 @app.post("/api/orders")
 async def order(req: OrderRequest, request: Request):
+    _require_role(request, "trader")
     sym = req.symbol.upper()
     if sym not in ALL_SYMBOLS:
         raise HTTPException(422, f"Symbol {sym} not tracked")
@@ -1409,6 +2071,15 @@ async def order(req: OrderRequest, request: Request):
         raise HTTPException(422, "Limit/stop orders require entry_price")
     if req.lots > MAX_LOT:
         raise HTTPException(422, f"Lot size exceeds server hard cap ({MAX_LOT})")
+    if req.mode == "live":
+        if not LIVE_ENABLED:
+            raise HTTPException(403, "Manual live execution is disabled on the server")
+        _require_live_auth(request)
+        if (
+            os.getenv("REQUIRE_LIVE_STOP_LOSS", "true").lower() == "true"
+            and req.stop_loss is None
+        ):
+            raise HTTPException(422, "Production live orders require a stop loss")
 
     tick_info = latest_by_symbol.get(sym, {})
     if not tick_info and isinstance(latest, dict):
@@ -1424,6 +2095,31 @@ async def order(req: OrderRequest, request: Request):
     info = await asyncio.to_thread(mt5.symbol_info, sym) if mt5_ready and mt5 else None
     spec = spec_from_info(sym, info) if info else fallback_spec(sym)
     lots = normalize_volume(req.lots, spec, MAX_LOT)
+    min_distance = minimum_stop_distance(spec)
+    reference_entry = float(req.entry_price) if req.entry_price is not None else (ask if req.side == "buy" else bid)
+
+    if req.side == "buy":
+        if req.stop_loss is not None and req.stop_loss >= reference_entry - min_distance:
+            raise HTTPException(422, "BUY stop loss must be below entry by at least the minimum stop distance")
+        if req.take_profit is not None and req.take_profit <= reference_entry + min_distance:
+            raise HTTPException(422, "BUY take profit must be above entry by at least the minimum stop distance")
+    else:
+        if req.stop_loss is not None and req.stop_loss <= reference_entry + min_distance:
+            raise HTTPException(422, "SELL stop loss must be above entry by at least the minimum stop distance")
+        if req.take_profit is not None and req.take_profit >= reference_entry - min_distance:
+            raise HTTPException(422, "SELL take profit must be below entry by at least the minimum stop distance")
+
+    if req.order_type == "limit" and req.entry_price is not None:
+        if req.side == "buy" and req.entry_price >= ask - min_distance:
+            raise HTTPException(422, "BUY limit entry must be below the current ask")
+        if req.side == "sell" and req.entry_price <= bid + min_distance:
+            raise HTTPException(422, "SELL limit entry must be above the current bid")
+    if req.order_type == "stop" and req.entry_price is not None:
+        if req.side == "buy" and req.entry_price <= ask + min_distance:
+            raise HTTPException(422, "BUY stop entry must be above the current ask")
+        if req.side == "sell" and req.entry_price >= bid - min_distance:
+            raise HTTPException(422, "SELL stop entry must be below the current bid")
+
     sp_points = spread_points(bid, ask, spec)
     spread_limit = max_spread_points_for(sym)
     if sp_points > spread_limit:
@@ -1439,12 +2135,36 @@ async def order(req: OrderRequest, request: Request):
         positions_count = len(open_rows)
         exposure = sum(float(p.volume) for p in open_rows)
     if req.mode == "live":
+        allowed, gate_reason = control.trade_gate(sym, "live", autonomous=False)
+        if not allowed:
+            raise HTTPException(403, gate_reason)
         await update_realized()
         if risk.realized <= -MAX_DAILY_LOSS:
             risk.kill()
+            control.halt(f"Daily loss limit reached: {risk.realized:.2f}")
     decision = risk.check(lots, positions_count, exposure, 0.0)
     if not decision["allowed"]:
         raise HTTPException(403, "; ".join(decision["reasons"]))
+
+    if req.mode == "live" and mt5_ready and mt5:
+        all_live = [
+            p for p in (list(await asyncio.to_thread(mt5.positions_get) or []))
+            if getattr(p, "magic", None) == MAGIC
+        ]
+        account_info = await asyncio.to_thread(mt5.account_info)
+        symbol_lots = sum(float(p.volume) for p in all_live if p.symbol == sym)
+        total_lots = sum(float(p.volume) for p in all_live)
+        prod_allowed, prod_reasons = control.portfolio_gate(
+            requested_lots=lots,
+            symbol_lots=symbol_lots,
+            total_lots=total_lots,
+            open_positions=len(all_live),
+            margin_level=float(getattr(account_info, "margin_level", 0.0) or 0.0) if account_info else None,
+            margin_used=float(getattr(account_info, "margin", 0.0) or 0.0) if account_info else None,
+            equity=float(getattr(account_info, "equity", 0.0) or 0.0) if account_info else None,
+        )
+        if not prod_allowed:
+            raise HTTPException(403, "; ".join(prod_reasons))
 
     payload = req.model_dump()
     if not execution_ledger.reserve(req.client_order_id, sym, req.mode, req.order_type, payload):
@@ -1493,8 +2213,19 @@ async def order(req: OrderRequest, request: Request):
         info = await asyncio.to_thread(mt5.symbol_info, sym)
         if tick is None or info is None:
             raise HTTPException(503, "MT5 symbol/tick unavailable")
+        tick_ms = int(getattr(tick, "time_msc", 0) or 0)
+        max_tick_age = max(500, int(os.getenv("MAX_LIVE_TICK_AGE_MS", "5000")))
+        if tick_ms and int(time.time() * 1000) - tick_ms > max_tick_age:
+            raise HTTPException(503, f"Broker tick is stale (> {max_tick_age} ms)")
         spec = spec_from_info(sym, info)
         lots = normalize_volume(lots, spec, MAX_LOT)
+        live_spread_points = spread_points(tick.bid, tick.ask, spec)
+        live_spread_limit = max_spread_points_for(sym)
+        if live_spread_points > live_spread_limit:
+            raise HTTPException(
+                403,
+                f"Live broker spread guard active ({live_spread_points:.1f} pts > {live_spread_limit:.1f} pts for {sym})",
+            )
         is_buy = req.side == "buy"
         pending = req.order_type != "market"
         if req.order_type == "market":
@@ -1508,6 +2239,19 @@ async def order(req: OrderRequest, request: Request):
             else:
                 typ = mt5.ORDER_TYPE_BUY_STOP if is_buy else mt5.ORDER_TYPE_SELL_STOP
             price = normalize_price(float(req.entry_price), spec)
+
+        account_now = await asyncio.to_thread(mt5.account_info)
+        if req.stop_loss is not None and account_now is not None:
+            stop_value = normalize_price(req.stop_loss, spec)
+            risk_usd = risk_per_lot(price, stop_value, spec) * lots
+            equity = float(getattr(account_now, "equity", 0.0) or 0.0)
+            risk_pct = risk_usd / equity * 100.0 if equity > 0 else 100.0
+            max_risk_pct = float(control.risk_policy()["maxRiskPerTradePct"])
+            if risk_pct > max_risk_pct:
+                raise HTTPException(
+                    403,
+                    f"Trade risk {risk_pct:.2f}% exceeds production cap {max_risk_pct:.2f}%",
+                )
 
         mt5_request = {
             "action": action,
@@ -1564,12 +2308,14 @@ async def kill_all(
     symbol: str = "ALL",
     mode: Literal["paper", "live"] = "paper",
 ):
+    _require_role(request, "trader")
     sym = symbol.upper()
     if sym != "ALL" and sym not in ALL_SYMBOLS:
         raise HTTPException(422, f"Symbol {sym} not tracked")
     target = None if sym == "ALL" else sym
 
     risk.kill()
+    control.halt(f"Kill switch activated for {sym} ({mode})")
     for eng in ENGINES.values():
         eng.risk.kill()
 

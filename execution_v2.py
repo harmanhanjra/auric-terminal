@@ -172,6 +172,10 @@ class ExecutionLedger:
                 self.db.commit()
                 return True
             except sqlite3.IntegrityError:
+                # A failed INSERT starts/poisons the current SQLite transaction.
+                # Roll it back immediately or this connection can retain a write
+                # lock and block audit/reconciliation writers.
+                self.db.rollback()
                 return False
 
     def complete(self, client_order_id: str, result: dict, broker_ticket: Any = None) -> None:
@@ -196,14 +200,91 @@ class ExecutionLedger:
         ).fetchone()
         return dict(row) if row else None
 
+    def recent(self, limit: int = 500, mode: str | None = None) -> list[dict]:
+        if mode:
+            rows = self.db.execute(
+                "SELECT * FROM execution_ledger WHERE mode=? ORDER BY ts DESC LIMIT ?",
+                (mode, max(1, min(limit, 5000))),
+            ).fetchall()
+        else:
+            rows = self.db.execute(
+                "SELECT * FROM execution_ledger ORDER BY ts DESC LIMIT ?",
+                (max(1, min(limit, 5000)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def broker_tickets(self, mode: str = "live", limit: int = 5000) -> set[int]:
+        rows = self.db.execute(
+            "SELECT broker_ticket FROM execution_ledger "
+            "WHERE mode=? AND broker_ticket IS NOT NULL ORDER BY ts DESC LIMIT ?",
+            (mode, max(1, min(limit, 10000))),
+        ).fetchall()
+        out: set[int] = set()
+        for row in rows:
+            try:
+                out.add(int(row["broker_ticket"]))
+            except (TypeError, ValueError):
+                continue
+        return out
+
 
 class PaperBroker:
-    """Small deterministic paper broker with market/pending orders and SL/TP."""
+    """Deterministic paper broker with optional durable SQLite state."""
 
-    def __init__(self):
+    def __init__(self, path: str | None = None):
         self._positions: dict[int, dict] = {}
         self._pending: dict[int, dict] = {}
         self._seq = int(time.time() * 1000) % 2_000_000_000
+        self._db: sqlite3.Connection | None = None
+        if path:
+            self._db = sqlite3.connect(path, check_same_thread=False)
+            self._db.row_factory = sqlite3.Row
+            self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.execute("PRAGMA busy_timeout=5000")
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS paper_state("
+                "kind TEXT NOT NULL, ticket INTEGER NOT NULL, payload TEXT NOT NULL, "
+                "PRIMARY KEY(kind,ticket))"
+            )
+            self._db.commit()
+            self._restore()
+
+    def _restore(self) -> None:
+        if self._db is None:
+            return
+        rows = self._db.execute("SELECT kind,ticket,payload FROM paper_state").fetchall()
+        max_ticket = self._seq
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+                ticket = int(row["ticket"])
+            except Exception:
+                continue
+            max_ticket = max(max_ticket, ticket)
+            if row["kind"] == "position":
+                self._positions[ticket] = payload
+            elif row["kind"] == "pending":
+                self._pending[ticket] = payload
+        self._seq = max_ticket
+
+    def _persist(self) -> None:
+        if self._db is None:
+            return
+        self._db.execute("BEGIN IMMEDIATE")
+        try:
+            self._db.execute("DELETE FROM paper_state")
+            self._db.executemany(
+                "INSERT INTO paper_state(kind,ticket,payload) VALUES('position',?,?)",
+                [(ticket, json.dumps(payload, default=str)) for ticket, payload in self._positions.items()],
+            )
+            self._db.executemany(
+                "INSERT INTO paper_state(kind,ticket,payload) VALUES('pending',?,?)",
+                [(ticket, json.dumps(payload, default=str)) for ticket, payload in self._pending.items()],
+            )
+            self._db.commit()
+        except Exception:
+            self._db.rollback()
+            raise
 
     def _ticket(self) -> int:
         self._seq += 1
@@ -241,6 +322,7 @@ class PaperBroker:
                 "contractSize": spec.contract_size,
             }
             self._positions[ticket] = pos
+            self._persist()
             return {"accepted": True, "status": "filled", "ticket": ticket, "fillPrice": pos["entry"]}
 
         if not entry_price or entry_price <= 0:
@@ -254,6 +336,7 @@ class PaperBroker:
             "contractSize": spec.contract_size,
         }
         self._pending[ticket] = order
+        self._persist()
         return {"accepted": True, "status": "pending", "ticket": ticket, "fillPrice": None}
 
     def on_tick(self, symbol: str, bid: float, ask: float) -> list[dict]:
@@ -299,6 +382,10 @@ class PaperBroker:
                 closed["exit"] = market
                 events.append({"type": "close", **closed})
                 del self._positions[ticket]
+        # Persist structural state changes only; mark-to-market values are
+        # recomputed on the next tick after restart.
+        if events:
+            self._persist()
         return events
 
     def positions(self, symbol: str | None = None) -> list[dict]:
@@ -309,6 +396,52 @@ class PaperBroker:
         rows = [dict(v) for v in self._pending.values()]
         return [r for r in rows if r["symbol"] == symbol] if symbol else rows
 
+    def close_position(self, ticket: int, lots: float | None = None) -> dict:
+        if ticket not in self._positions:
+            raise KeyError("Paper position not found")
+        pos = self._positions[ticket]
+        close_lots = float(pos["lots"] if lots is None else lots)
+        if close_lots <= 0 or close_lots > float(pos["lots"]):
+            raise ValueError("Invalid close volume")
+        fraction = close_lots / float(pos["lots"])
+        realized = float(pos.get("pnl", 0.0)) * fraction
+        result = {
+            **dict(pos),
+            "exit": float(pos.get("market", pos["entry"])),
+            "closedLots": close_lots,
+            "pnl": realized,
+            "reason": "Manual close",
+        }
+        remaining = float(pos["lots"]) - close_lots
+        if remaining <= 1e-12:
+            del self._positions[ticket]
+        else:
+            pos["lots"] = remaining
+            pos["pnl"] = float(pos.get("pnl", 0.0)) - realized
+        self._persist()
+        return result
+
+    def protect_position(self, ticket: int, *, sl: float | None = None, tp: float | None = None,
+                         breakeven: bool = False) -> dict:
+        if ticket not in self._positions:
+            raise KeyError("Paper position not found")
+        pos = self._positions[ticket]
+        if breakeven:
+            pos["sl"] = float(pos["entry"])
+        elif sl is not None:
+            pos["sl"] = float(sl)
+        if tp is not None:
+            pos["tp"] = float(tp)
+        self._persist()
+        return dict(pos)
+
+    def cancel_pending(self, ticket: int) -> dict:
+        if ticket not in self._pending:
+            raise KeyError("Paper pending order not found")
+        order = self._pending.pop(ticket)
+        self._persist()
+        return order
+
     def flatten(self, symbol: str | None = None) -> tuple[int, int]:
         pos_ids = [k for k, v in self._positions.items() if symbol is None or v["symbol"] == symbol]
         ord_ids = [k for k, v in self._pending.items() if symbol is None or v["symbol"] == symbol]
@@ -316,6 +449,7 @@ class PaperBroker:
             del self._positions[k]
         for k in ord_ids:
             del self._pending[k]
+        self._persist()
         return len(pos_ids), len(ord_ids)
 
 
