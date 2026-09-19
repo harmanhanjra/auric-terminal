@@ -1,30 +1,25 @@
-# AuricTerminal V2 — Manual + Autonomous Trading Workstation
+# AuricTerminal V3 — Production-Oriented Trading Workstation
 
-Multi-asset trading workstation for XAUUSD, BTCUSD and EURUSD with broker-aware manual
-execution, a real paper broker, guarded autonomous engines, durable order idempotency,
-risk-based sizing, research/backtesting, Kronos confirmation, WebSocket data and Electron desktop packaging.
+Multi-asset workstation for XAUUSD, BTCUSD and EURUSD with broker-aware manual execution, durable paper trading, guarded autonomous engines, RBAC, rate limiting, persistent circuit breakers, portfolio risk policy, economic-event blackouts, broker reconciliation, audit logs, backups, research/backtesting, Kronos confirmation, WebSocket data and Electron desktop packaging.
 
-V2 details are documented in docs/AURIC_V2.md.
+V3 operations and promotion rules are documented in **docs/PRODUCTION_V3.md**.
 
-> **Safety first.** This is a functional engineering MVP, **not** a certified brokerage system.
-> It has **no login/auth, no rate limiting, and local-only secret storage**.
-> Run it on `127.0.0.1`, start with a **demo account**, keep `ENABLE_LIVE_TRADING=false`
-> until you have paper-tested, and never expose it to the public internet without
-> authentication, TLS, and secret management in front of it.
-
+> **Execution safety:** Auric V3 is a production-oriented single-node workstation, not a certified broker or profit-guarantee system. Real execution stays disabled by default and must be promoted through **Shadow → Paper → Assisted → Auto**. Internet-facing multi-user deployments should terminate TLS at a reverse proxy and use managed identity/secret infrastructure in addition to Auric's application gates.
 ## Architecture
 
 ```
 web/ (React 19 + TS + Vite + Tailwind) ──/api + /ws──▶ server.py (FastAPI gateway)
+                                                      ├── production_control.py RBAC / audit / policy / news / circuit
+                                                      ├── execution_v2.py  broker math / ledger / durable paper broker
                                                       ├── engine.py        strategies / sizing / backtest
-                                                      ├── multi_engine.py  per-symbol auto-engines
+                                                      ├── multi_engine.py  per-symbol guarded auto-engines
                                                       ├── brain_agent.py   setup-analysis heuristics
                                                       ├── kronos_engine.py optional AI forecast (torch)
                                                       └── auric.db         SQLite journal (git-ignored)
 ```
 
 Data priority: **MT5 → Twelve Data → Yahoo → clearly-labelled Demo feed**.
-Manual live orders require `ENABLE_LIVE_TRADING=true`; autonomous live orders additionally require `ENABLE_AUTO_LIVE_TRADING=true`.
+Manual live orders require `ENABLE_LIVE_TRADING=true` and execution stage `assisted` or `auto`. Autonomous live orders additionally require `ENABLE_AUTO_LIVE_TRADING=true`, stage `auto`, a broker connection, configured production RBAC, a clear circuit, and clean reconciliation.
 
 ## Prerequisites
 
@@ -152,7 +147,10 @@ All settings are env vars (see `.env.example`). Key ones:
 | `ENGINE_*` | see `.env.example` | Auto-engine strategy/timeframe/risk/trail/pyramid |
 | `ENGINE_KRONOS_CONFIRM`, `KRONOS_*` | `true`, … | AI veto/confirm filter tuning |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | empty | Entry/kill notifications; **never commit real values** |
-| `AURIC_LIVE_API_KEY` | empty | Required `X-Auric-Key` for live order/kill requests; fail-closed if unset |
+| `AURIC_LIVE_API_KEY` | empty | Second high-risk credential required for live mutations |
+| `AURIC_AUTH_REQUIRED` | `false` | Enable viewer/trader/admin RBAC; set `true` in production |
+| `AURIC_EXECUTION_STAGE` | `paper` | Persisted Shadow/Paper/Assisted/Auto execution stage |
+| `AURIC_DB_PATH` | `./auric.db` | Durable journal/control/execution/paper state database |
 
 ## Main API
 
@@ -203,23 +201,28 @@ Drop `timestamps,open,close,high,low,volume,amount` CSVs into
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest tests -q   # 74 tests: engine + gateway
+python -m pytest tests -q   # engine + execution + production-control + gateway suites
 ```
 
-## Production hardening — still required
+## V3 production controls
 
-Do these before material capital or any public exposure:
+Implemented in the application:
 
-- [ ] AuthN/Z: OIDC/Supabase login + RBAC in front of every `/api/*`
-- [ ] Secrets: vault/secret-manager for MT5 + Telegram creds; **rotate the Telegram
-      bot token that was previously stored in plaintext `.env`**
-- [ ] Persistence: PostgreSQL/TimescaleDB for journal, Redis fan-out for ticks
-- [x] Idempotency: durable `client_order_id` dedupe in SQLite
-- [x] Broker details: symbol precision/volume/filling normalization and order preflight
-- [ ] Broker reconciliation worker + verified economic-news calendar guard
-- [ ] Ops: reverse-proxy TLS, rate limits, structured logs/alerts, backup/restore drill
-- [ ] Release: `npm audit` + `pip-audit`, full test suite green, independent deploy review
+- [x] viewer/trader/admin RBAC plus separate live-execution credential
+- [x] request IDs, mutation audit log and application rate limiting
+- [x] Shadow → Paper → Assisted → Auto promotion stages
+- [x] durable idempotency and durable paper positions/pending orders
+- [x] broker-aware sizing, order preflight, spread and stale-tick checks
+- [x] portfolio exposure, margin, per-trade risk and daily-loss gates
+- [x] persistent circuit breaker and risk-reducing position controls
+- [x] broker reconciliation with drift detection and automatic halt
+- [x] economic-event blackout framework and normalized feed sync
+- [x] online SQLite backups with retention
+- [x] mounted secret-file support
+- [x] non-root reproducible container and TLS reverse-proxy example
+- [x] CI dependency audits, tests, frontend build and container build
 
+External infrastructure is still recommended for public/multi-instance deployments: managed OIDC/SSO, centralized secret management, shared rate-limit/event state, PostgreSQL/Redis or equivalent, centralized logs/metrics, and independent release review.
 ## Troubleshooting
 
 | Symptom | Fix |
