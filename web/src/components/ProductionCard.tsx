@@ -19,7 +19,7 @@ export function ProductionCard({ activeSymbol }: { activeSymbol: string }) {
   const blackout = status?.blackout?.[activeSymbol]
 
   return (
-    <section className="border-b border-ink-700/70 bg-ink-900/55 p-3">
+    <section className="border-b border-white/[0.055] bg-ink-900/46 p-3">
       <div className="mb-2.5 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className={clsx(
@@ -52,7 +52,7 @@ export function ProductionCard({ activeSymbol }: { activeSymbol: string }) {
               setLiveKey('')
               window.location.reload()
             }}
-            className="rounded border border-ink-700 px-2 py-1 text-[8px] font-bold uppercase tracking-[0.08em] text-fg-500 hover:text-fg-200"
+            className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-2 py-1 text-[8px] font-bold uppercase tracking-[0.08em] text-fg-500 hover:bg-white/[0.04] hover:text-fg-200"
             title="Clear operator session and live execution key"
           >
             Sign out
@@ -67,7 +67,7 @@ export function ProductionCard({ activeSymbol }: { activeSymbol: string }) {
         <Metric label={activeSymbol + ' blackout'} value={blackout?.allowed === false ? 'ACTIVE' : 'CLEAR'} good={blackout?.allowed !== false} />
       </div>
 
-      <div className="mt-2 rounded-md border border-ink-700/70 bg-ink-950/55 p-2">
+      <div className="auric-surface mt-2 rounded-xl p-2">
         <div className="mb-1.5 flex items-center gap-1 text-[8px] font-bold uppercase tracking-[0.1em] text-fg-500">
           <RadioTower className="h-3 w-3" /> Broker integrity
         </div>
@@ -105,7 +105,7 @@ export function ProductionCard({ activeSymbol }: { activeSymbol: string }) {
 
 function Metric({ label, value, good }: { label: string; value: string; good?: boolean }) {
   return (
-    <div className="rounded border border-ink-800/80 px-2 py-1.5">
+    <div className="rounded-lg border border-white/[0.045] bg-black/10 px-2 py-1.5">
       <div className="text-[7px] font-bold uppercase tracking-[0.11em] text-fg-600">{label}</div>
       <div className={clsx(
         'mt-0.5 truncate font-semibold',

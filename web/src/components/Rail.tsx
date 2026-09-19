@@ -30,24 +30,28 @@ const ITEMS: { key: ViewKey; label: string; icon: typeof Target }[] = [
 
 export function Rail({ view, onNavigate }: RailProps) {
   return (
-    <nav className="flex flex-col items-center gap-1 border-r border-ink-700/70 bg-ink-900 py-3">
+    <nav className="relative flex w-16 flex-col items-center gap-1 border-r border-white/[0.055] bg-ink-900/74 py-3 backdrop-blur-xl">
       {ITEMS.map(({ key, label, icon: Icon }) => (
         <button
           key={key}
           title={label}
           aria-label={label}
           onClick={() => onNavigate(key)}
+          data-active={view === key}
           className={clsx(
-            'relative flex h-11 w-11 items-center justify-center rounded-lg transition-colors',
+            'group/nav auric-rail-item relative flex h-11 w-11 items-center justify-center rounded-xl transition-[background-color,color,transform] duration-200',
             view === key
-              ? 'text-gold-400'
-              : 'text-fg-500 hover:bg-ink-800 hover:text-fg-200',
+              ? 'bg-gold-400/[0.065] text-gold-300'
+              : 'text-fg-500 hover:bg-white/[0.045] hover:text-fg-100',
           )}
         >
           {view === key && (
-            <span className="absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r bg-gold-400" />
+            <span className="absolute -left-[11px] top-1/2 h-6 w-[2px] -translate-y-1/2 rounded-r bg-gold-300 shadow-[0_0_14px_rgba(222,190,90,.6)]" />
           )}
-          <Icon className="h-5 w-5" strokeWidth={1.7} />
+          <Icon className="relative z-10 h-[18px] w-[18px]" strokeWidth={1.75} />
+          <span className="pointer-events-none absolute left-[52px] z-50 whitespace-nowrap rounded-md border border-white/[0.07] bg-ink-900/95 px-2 py-1 text-[9px] font-semibold tracking-wide text-fg-200 opacity-0 shadow-2xl backdrop-blur-xl transition-all duration-150 group-hover/nav:translate-x-1 group-hover/nav:opacity-100">
+            {label}
+          </span>
         </button>
       ))}
       <div className="mt-auto flex flex-col gap-1">
@@ -55,7 +59,7 @@ export function Rail({ view, onNavigate }: RailProps) {
           title="Settings"
           aria-label="Settings"
           onClick={() => alert('Settings coming soon')}
-          className="flex h-11 w-11 items-center justify-center rounded-lg text-fg-500 transition-colors hover:bg-ink-800 hover:text-fg-200"
+          className="auric-rail-item flex h-11 w-11 items-center justify-center rounded-xl text-fg-500 transition-colors hover:bg-white/[0.045] hover:text-fg-100"
         >
           <Settings className="h-5 w-5" strokeWidth={1.7} />
         </button>

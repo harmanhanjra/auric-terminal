@@ -36,6 +36,20 @@
   --color-status-warning: #c9a227;
   --color-status-error: #ea3943;
   --color-status-disabled: #6b748a;
+  --color-card: #0b1018;
+  --color-card-foreground: #e8e8ec;
+  --color-popover: #0b1018;
+  --color-popover-foreground: #e8e8ec;
+  --color-primary: #d2ad3d;
+  --color-primary-foreground: #090d13;
+  --color-secondary: #121923;
+  --color-secondary-foreground: #c5cad4;
+  --color-muted: #111821;
+  --color-muted-foreground: #7e899c;
+  --color-border: #202b39;
+  --color-input: #202b39;
+  --color-ring: #d2ad3d;
+  --color-destructive: #ea3943;
 
   --font-sans: "Geist", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "Geist Mono", "JetBrains Mono", ui-monospace, "SF Mono", Consolas, monospace;
@@ -53,6 +67,7 @@ html,
 body,
 #root {
   height: 100%;
+  min-height: 100%;
   background-color: var(--color-ink-950);
   color: var(--color-fg-200);
   font-family: var(--font-sans);
@@ -62,6 +77,16 @@ body,
   -moz-osx-font-smoothing: grayscale;
   margin: 0;
   padding: 0;
+}
+
+:root {
+  color-scheme: dark;
+  --auric-radius: 10px;
+  --auric-shadow: 0 18px 60px rgba(0, 0, 0, 0.34);
+}
+
+#root {
+  isolation: isolate;
 }
 
 /* Monospace for numeric */
@@ -159,4 +184,358 @@ button, [role="button"], a { cursor: pointer; }
 ::selection {
   background: rgba(201, 162, 39, .22);
   color: var(--color-fg-100);
+}
+
+
+/* -------------------------------------------------------------------------- */
+/* Auric Premium UI system                                                     */
+/* shadcn-style tokens + React Bits / Motion Primitives / Magic UI inspiration */
+/* -------------------------------------------------------------------------- */
+
+.auric-shell {
+  background:
+    radial-gradient(circle at 12% -8%, rgba(201, 162, 39, 0.055), transparent 27%),
+    radial-gradient(circle at 88% 8%, rgba(76, 201, 240, 0.035), transparent 22%),
+    #05070b;
+}
+
+.terminal-workspace {
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.018);
+}
+
+.auric-topbar {
+  background:
+    linear-gradient(180deg, rgba(9, 13, 19, .94), rgba(5, 7, 11, .90));
+  border-bottom-color: rgba(255,255,255,.065);
+  box-shadow: 0 10px 36px rgba(0,0,0,.28), inset 0 -1px 0 rgba(255,255,255,.015);
+}
+
+.auric-side-panel {
+  box-shadow: inset 1px 0 0 rgba(255,255,255,.018);
+}
+
+.auric-surface {
+  background:
+    linear-gradient(180deg, rgba(15, 21, 30, .92), rgba(8, 12, 18, .94));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.035);
+}
+
+.auric-surface::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(115deg, rgba(255,255,255,.025), transparent 20%, transparent 78%, rgba(201,162,39,.025));
+}
+
+.auric-surface-elevated {
+  box-shadow:
+    0 22px 70px rgba(0,0,0,.42),
+    inset 0 1px 0 rgba(255,255,255,.045);
+}
+
+.auric-surface-interactive {
+  transition: border-color 180ms ease, transform 180ms ease, box-shadow 180ms ease;
+}
+
+.auric-surface-interactive:hover {
+  transform: translateY(-1px);
+  border-color: rgba(222,190,90,.18);
+  box-shadow:
+    0 18px 48px rgba(0,0,0,.34),
+    0 0 0 1px rgba(201,162,39,.035),
+    inset 0 1px 0 rgba(255,255,255,.045);
+}
+
+.auric-control {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.auric-rail-item::after {
+  content: "";
+  position: absolute;
+  inset: 6px;
+  border-radius: 9px;
+  opacity: 0;
+  background: radial-gradient(circle at 50% 30%, rgba(201,162,39,.12), transparent 68%);
+  transition: opacity 180ms ease;
+  pointer-events: none;
+}
+
+.auric-rail-item:hover::after,
+.auric-rail-item[data-active="true"]::after {
+  opacity: 1;
+}
+
+.auric-backdrop {
+  opacity: 1;
+}
+
+.auric-orb {
+  position: absolute;
+  width: 40vw;
+  height: 40vw;
+  border-radius: 999px;
+  filter: blur(90px);
+  opacity: .08;
+  will-change: transform;
+}
+
+.auric-orb-gold {
+  top: -24vw;
+  left: 8vw;
+  background: rgba(215, 177, 61, .8);
+  animation: auric-orbit-a 18s ease-in-out infinite alternate;
+}
+
+.auric-orb-cyan {
+  top: -18vw;
+  right: -12vw;
+  background: rgba(76, 201, 240, .45);
+  animation: auric-orbit-b 24s ease-in-out infinite alternate;
+}
+
+.auric-beam {
+  position: absolute;
+  width: 46vw;
+  height: 1px;
+  opacity: .16;
+  background: linear-gradient(90deg, transparent, rgba(222,190,90,.55), transparent);
+  filter: blur(.2px);
+  transform-origin: center;
+}
+
+.auric-beam-one {
+  top: 17%;
+  left: 9%;
+  transform: rotate(-17deg);
+  animation: auric-beam-drift 14s ease-in-out infinite alternate;
+}
+
+.auric-beam-two {
+  right: 4%;
+  bottom: 12%;
+  transform: rotate(13deg);
+  opacity: .08;
+  animation: auric-beam-drift 19s ease-in-out infinite alternate-reverse;
+}
+
+.auric-vignette {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at 50% 22%, transparent 0, transparent 34%, rgba(0,0,0,.18) 78%, rgba(0,0,0,.48) 100%);
+}
+
+.auric-noise {
+  position: absolute;
+  inset: 0;
+  opacity: .028;
+  background-image:
+    repeating-radial-gradient(circle at 17% 21%, rgba(255,255,255,.45) 0 0.45px, transparent .55px 3px);
+  background-size: 7px 7px;
+  mix-blend-mode: soft-light;
+}
+
+@keyframes auric-orbit-a {
+  from { transform: translate3d(-2%, -2%, 0) scale(.96); }
+  to { transform: translate3d(10%, 12%, 0) scale(1.08); }
+}
+
+@keyframes auric-orbit-b {
+  from { transform: translate3d(4%, -4%, 0) scale(1); }
+  to { transform: translate3d(-10%, 8%, 0) scale(1.12); }
+}
+
+@keyframes auric-beam-drift {
+  from { translate: -3% -2%; opacity: .07; }
+  50% { opacity: .16; }
+  to { translate: 5% 4%; opacity: .09; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auric-orb,
+  .auric-beam,
+  .pulse-dot,
+  .animate-flash-up,
+  .animate-flash-down {
+    animation: none !important;
+  }
+
+  .auric-surface-interactive,
+  .auric-control {
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media (max-width: 1180px) {
+  .terminal-workspace {
+    grid-template-columns: 58px minmax(0, 1fr) 340px !important;
+  }
+}
+
+@media (max-width: 920px) {
+  .terminal-workspace {
+    grid-template-columns: 54px minmax(0, 1fr) !important;
+  }
+
+  .auric-side-panel {
+    display: none;
+  }
+}
+
+
+/* Workspace controls and panel resizing */
+.auric-resize-handle {
+  position: relative;
+  background: rgba(255,255,255,.028);
+  transition: background-color 160ms ease;
+  touch-action: none;
+  z-index: 25;
+}
+
+.auric-resize-handle::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  background: linear-gradient(180deg, transparent, rgba(222,190,90,.34), transparent);
+  transition: opacity 160ms ease;
+}
+
+.auric-resize-handle:hover,
+.auric-resize-handle:active {
+  background: rgba(201,162,39,.08);
+}
+
+.auric-resize-handle:hover::after,
+.auric-resize-handle:active::after {
+  opacity: 1;
+}
+
+.auric-resize-vertical {
+  width: 5px;
+  cursor: col-resize;
+  border-inline: 1px solid rgba(255,255,255,.035);
+}
+
+.auric-resize-horizontal {
+  cursor: row-resize;
+  border-block: 1px solid rgba(255,255,255,.035);
+}
+
+.auric-float-control {
+  display: inline-flex;
+  height: 32px;
+  align-items: center;
+  gap: 6px;
+  border-radius: 9px;
+  border: 1px solid rgba(255,255,255,.07);
+  background: rgba(8,12,18,.84);
+  padding-inline: 10px;
+  color: var(--color-fg-400);
+  font-size: 9px;
+  font-weight: 750;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  box-shadow: 0 10px 30px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.035);
+  backdrop-filter: blur(18px);
+  transition: border-color 160ms ease, background-color 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.auric-float-control:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255,255,255,.12);
+  background: rgba(15,21,30,.92);
+  color: var(--color-fg-100);
+}
+
+.auric-float-control-premium {
+  border-color: rgba(222,190,90,.18);
+  background: rgba(201,162,39,.07);
+  color: var(--color-gold-300);
+}
+
+.auric-layout-button {
+  display: grid;
+  width: 28px;
+  height: 26px;
+  place-items: center;
+  border-radius: 7px;
+  color: var(--color-fg-500);
+  transition: background-color 150ms ease, color 150ms ease;
+}
+
+.auric-layout-button:hover {
+  background: rgba(255,255,255,.05);
+  color: var(--color-fg-100);
+}
+
+.auric-chart-toolbar {
+  background: linear-gradient(180deg, rgba(12,17,24,.88), rgba(8,12,18,.74));
+  box-shadow: inset 0 -1px 0 rgba(255,255,255,.025);
+}
+
+.auric-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid rgba(255,255,255,.055);
+  border-radius: 9px;
+  background: rgba(0,0,0,.16);
+}
+
+.auric-toolbar-button {
+  display: inline-flex;
+  min-width: 28px;
+  height: 26px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border-radius: 7px;
+  padding-inline: 7px;
+  color: var(--color-fg-500);
+  font-size: 9px;
+  font-weight: 700;
+  transition: background-color 150ms ease, color 150ms ease, box-shadow 150ms ease;
+}
+
+.auric-toolbar-button:hover {
+  background: rgba(255,255,255,.045);
+  color: var(--color-fg-200);
+}
+
+.auric-toolbar-button[data-active="true"] {
+  background: rgba(201,162,39,.09);
+  color: var(--color-gold-300);
+  box-shadow: inset 0 0 0 1px rgba(222,190,90,.12);
+}
+
+.auric-data-overlay {
+  border: 1px solid rgba(255,255,255,.06);
+  background: rgba(7,10,15,.74);
+  box-shadow: 0 12px 32px rgba(0,0,0,.26), inset 0 1px 0 rgba(255,255,255,.03);
+  backdrop-filter: blur(16px);
+}
+
+.auric-field {
+  border: 1px solid rgba(255,255,255,.065);
+  background: rgba(0,0,0,.18);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.02);
+}
+
+.auric-field:focus-within {
+  border-color: rgba(222,190,90,.28);
+  background: rgba(0,0,0,.26);
+}
+
+@media (max-width: 920px) {
+  .auric-resize-vertical {
+    display: none;
+  }
+
+  .auric-float-control span {
+    display: none;
+  }
 }

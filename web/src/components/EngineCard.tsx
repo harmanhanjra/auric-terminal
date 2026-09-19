@@ -3,6 +3,7 @@ import { clsx } from 'clsx'
 import { Bot, BrainCircuit, Play, Shield, Square } from 'lucide-react'
 import { useState } from 'react'
 import { api, ApiError } from '../lib/api'
+import { Button } from './ui/Button'
 
 export function EngineCard({ activeSymbol = 'XAUUSD' }: { activeSymbol?: string }) {
   const queryClient = useQueryClient()
@@ -46,7 +47,7 @@ export function EngineCard({ activeSymbol = 'XAUUSD' }: { activeSymbol?: string 
   const autoLive = engineData?.config?.autoLive === true || engineData?.autoLiveEnabled === true
 
   return (
-    <section className="border-b border-ink-700/70 bg-ink-900/55 p-3">
+    <section className="border-b border-white/[0.055] bg-ink-900/48 p-3">
       <div className="mb-2.5 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className={clsx(
@@ -70,7 +71,7 @@ export function EngineCard({ activeSymbol = 'XAUUSD' }: { activeSymbol?: string 
         </span>
       </div>
 
-      <div className="grid grid-cols-2 gap-1.5 rounded-lg border border-ink-700/80 bg-ink-950/55 p-2.5 text-[9px]">
+      <div className="auric-surface grid grid-cols-2 gap-1.5 rounded-xl p-2.5 text-[9px]">
         <Metric label="Strategy" value={strategyName.toUpperCase()} />
         <Metric label="Timeframe" value={engineData?.timeframe || 'M15'} accent />
         <Metric label="Risk / trade" value={engineData?.config?.risk_pct != null ? `${engineData.config.risk_pct}%` : '—'} />
@@ -80,7 +81,7 @@ export function EngineCard({ activeSymbol = 'XAUUSD' }: { activeSymbol?: string 
       </div>
 
       <div className="mt-2 grid grid-cols-2 gap-1.5">
-        <div className="rounded-md border border-ink-700/70 bg-ink-800/45 p-2">
+        <div className="rounded-xl border border-white/[0.06] bg-white/[0.025] p-2">
           <div className="flex items-center gap-1 text-[8px] font-bold uppercase tracking-[0.1em] text-fg-500">
             <Shield className="h-3 w-3" /> Risk gate
           </div>
@@ -91,7 +92,7 @@ export function EngineCard({ activeSymbol = 'XAUUSD' }: { activeSymbol?: string 
             Spread ≤ {engineData?.risk?.maxSpreadPoints ?? '—'} pts
           </div>
         </div>
-        <div className="rounded-md border border-ink-700/70 bg-ink-800/45 p-2">
+        <div className="rounded-xl border border-white/[0.06] bg-white/[0.025] p-2">
           <div className="flex items-center gap-1 text-[8px] font-bold uppercase tracking-[0.1em] text-fg-500">
             <BrainCircuit className="h-3 w-3" /> Kronos
           </div>
@@ -111,20 +112,24 @@ export function EngineCard({ activeSymbol = 'XAUUSD' }: { activeSymbol?: string 
       ) : null}
 
       <div className="mt-2 grid grid-cols-2 gap-2">
-        <button
+        <Button
+          variant="primary"
+          size="sm"
           onClick={() => startMutation.mutate()}
           disabled={isRunning || startMutation.isPending}
-          className="flex h-8 items-center justify-center gap-1.5 rounded-md border border-bull-500/30 bg-bull-500/10 text-[9px] font-extrabold uppercase tracking-[0.08em] text-bull-400 hover:bg-bull-500/15 disabled:opacity-35"
+          className="h-8 text-[9px] font-extrabold uppercase tracking-[0.08em]"
         >
           <Play className="h-3.5 w-3.5" /> Arm engine
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
           onClick={() => stopMutation.mutate()}
           disabled={!isRunning || stopMutation.isPending}
-          className="flex h-8 items-center justify-center gap-1.5 rounded-md border border-ink-700 bg-ink-800 text-[9px] font-extrabold uppercase tracking-[0.08em] text-fg-400 hover:text-fg-200 disabled:opacity-35"
+          className="h-8 text-[9px] font-extrabold uppercase tracking-[0.08em]"
         >
           <Square className="h-3.5 w-3.5" /> Disarm
-        </button>
+        </Button>
       </div>
     </section>
   )
@@ -132,7 +137,7 @@ export function EngineCard({ activeSymbol = 'XAUUSD' }: { activeSymbol?: string 
 
 function Metric({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
   return (
-    <div className="min-w-0 rounded border border-ink-800/80 px-2 py-1.5">
+    <div className="min-w-0 rounded-lg border border-white/[0.045] bg-black/10 px-2 py-1.5">
       <div className="text-[7px] font-bold uppercase tracking-[0.11em] text-fg-600">{label}</div>
       <div className={clsx('mt-0.5 truncate font-semibold text-fg-300', accent && 'tnum text-gold-300')}>{value}</div>
     </div>
