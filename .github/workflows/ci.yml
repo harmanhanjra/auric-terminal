@@ -20,6 +20,8 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: pip install -r requirements-dev.txt
+      - run: python -m compileall -q server.py engine.py execution_v2.py multi_engine.py production_core.py
+      - run: pip check
       # Kronos contains its own heavyweight upstream research/model tests.
       # The application CI installs and verifies only the API/engine test suite.
       - run: pytest -q tests
