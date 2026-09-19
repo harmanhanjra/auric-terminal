@@ -907,9 +907,37 @@ async def reconciliation_loop():
     interval = max(5, int(os.getenv("RECONCILE_INTERVAL_SECONDS", "15")))
     while True:
         try:
-            await reconcile_once()
+            summary = await reconcile_once()
+            auto_active = AUTO_LIVE_ENABLED and control.execution_stage() == "auto"
+            if auto_active and not control.is_halted():
+                if (
+                    os.getenv("HALT_ON_BROKER_DISCONNECT", "true").lower() == "true"
+                    and not summary.get("mt5Connected")
+                ):
+                    control.halt("MT5 broker connection lost while AUTO stage was active")
+                    risk.kill()
+                    for eng in ENGINES.values():
+                        eng.risk.kill()
+                elif (
+                    os.getenv("HALT_ON_RECONCILIATION_DRIFT", "true").lower() == "true"
+                    and summary.get("untrackedBrokerTickets")
+                ):
+                    tickets = summary["untrackedBrokerTickets"]
+                    control.halt(f"Reconciliation drift detected for broker tickets: {tickets[:10]}")
+                    risk.kill()
+                    for eng in ENGINES.values():
+                        eng.risk.kill()
         except Exception as exc:
             control.record_reconciliation("error", {"error": str(exc)})
+            if (
+                AUTO_LIVE_ENABLED
+                and control.execution_stage() == "auto"
+                and os.getenv("HALT_ON_RECONCILIATION_ERROR", "true").lower() == "true"
+            ):
+                control.halt(f"Reconciliation loop error: {exc}")
+                risk.kill()
+                for eng in ENGINES.values():
+                    eng.risk.kill()
             logger.warning("Reconciliation failed: %s", exc)
         await asyncio.sleep(interval)
 
@@ -1114,8 +1142,26 @@ async def whoami(request: Request):
 @app.post("/api/system/stage")
 async def set_execution_stage(req: ExecutionStageRequest, request: Request):
     principal = _require_role(request, "admin")
-    if req.stage == "auto" and (not AUTO_LIVE_ENABLED or not LIVE_API_KEY):
-        raise HTTPException(409, "Auto stage requires ENABLE_AUTO_LIVE_TRADING=true and AURIC_LIVE_API_KEY")
+    if req.stage == "auto":
+        blockers: list[str] = []
+        if not AUTO_LIVE_ENABLED:
+            blockers.append("ENABLE_AUTO_LIVE_TRADING is false")
+        if not LIVE_API_KEY:
+            blockers.append("AURIC_LIVE_API_KEY is not configured")
+        if not mt5_ready or not mt5:
+            blockers.append("MT5 broker is not connected")
+        if control.is_halted():
+            blockers.append("global circuit is halted")
+        if (
+            os.getenv("REQUIRE_AUTH_FOR_AUTO", "true").lower() == "true"
+            and (not control.auth_required or control.status()["configuredPrincipals"] <= 0)
+        ):
+            blockers.append("production RBAC is not enabled/configured")
+        if blockers:
+            raise HTTPException(409, "AUTO promotion blocked: " + "; ".join(blockers))
+        recon = await reconcile_once()
+        if recon.get("untrackedBrokerTickets"):
+            raise HTTPException(409, "AUTO promotion blocked by reconciliation drift")
     stage = control.set_execution_stage(req.stage)
     control.audit(
         request_id=getattr(request.state, "request_id", ""),
@@ -1943,6 +1989,10 @@ async def order(req: OrderRequest, request: Request):
         info = await asyncio.to_thread(mt5.symbol_info, sym)
         if tick is None or info is None:
             raise HTTPException(503, "MT5 symbol/tick unavailable")
+        tick_ms = int(getattr(tick, "time_msc", 0) or 0)
+        max_tick_age = max(500, int(os.getenv("MAX_LIVE_TICK_AGE_MS", "5000")))
+        if tick_ms and int(time.time() * 1000) - tick_ms > max_tick_age:
+            raise HTTPException(503, f"Broker tick is stale (> {max_tick_age} ms)")
         spec = spec_from_info(sym, info)
         lots = normalize_volume(lots, spec, MAX_LOT)
         live_spread_points = spread_points(tick.bid, tick.ask, spec)
