@@ -1,8 +1,10 @@
-# AuricTerminal — All-Phase MVP
+# AuricTerminal V2 — Manual + Autonomous Trading Workstation
 
-Responsive XAU/USD (plus BTC/FX) trading terminal: normalized live data, guarded MT5 execution,
-19 signal strategies, 7 position-sizing models, event-driven backtesting, optimization,
-Monte Carlo analysis, risk controls, kill switch, and a SQLite trade journal.
+Multi-asset trading workstation for XAUUSD, BTCUSD and EURUSD with broker-aware manual
+execution, a real paper broker, guarded autonomous engines, durable order idempotency,
+risk-based sizing, research/backtesting, Kronos confirmation, WebSocket data and Electron desktop packaging.
+
+V2 details are documented in docs/AURIC_V2.md.
 
 > **Safety first.** This is a functional engineering MVP, **not** a certified brokerage system.
 > It has **no login/auth, no rate limiting, and local-only secret storage**.
@@ -22,7 +24,7 @@ web/ (React 19 + TS + Vite + Tailwind) ──/api + /ws──▶ server.py (Fast
 ```
 
 Data priority: **MT5 → Twelve Data → Yahoo → clearly-labelled Demo feed**.
-Live MT5 orders are sent only when `ENABLE_LIVE_TRADING=true` **and** mode is `live`.
+Manual live orders require `ENABLE_LIVE_TRADING=true`; autonomous live orders additionally require `ENABLE_AUTO_LIVE_TRADING=true`.
 
 ## Prerequisites
 
@@ -144,7 +146,8 @@ All settings are env vars (see `.env.example`). Key ones:
 | Var | Default | Purpose |
 |---|---|---|
 | `MARKET_DATA_SOURCE` | `auto` | `auto`/`mt5`/`twelvedata`/`web` |
-| `ENABLE_LIVE_TRADING` | `false` | Master kill for real MT5 orders — keep `false` until validated |
+| `ENABLE_LIVE_TRADING` | `false` | Manual real-order gate |
+| `ENABLE_AUTO_LIVE_TRADING` | `false` | Separate autonomous real-order gate |
 | `MAX_LOT` / `MAX_DAILY_LOSS` | `1.0` / `500.0` | Server-side risk caps |
 | `ENGINE_*` | see `.env.example` | Auto-engine strategy/timeframe/risk/trail/pyramid |
 | `ENGINE_KRONOS_CONFIRM`, `KRONOS_*` | `true`, … | AI veto/confirm filter tuning |
@@ -164,9 +167,11 @@ All settings are env vars (see `.env.example`). Key ones:
 | POST | `/api/optimize` | Parameter-grid optimization (≤250 combos) |
 | POST | `/api/monte-carlo` | Resampled trade simulations |
 | GET | `/api/account` | MT5 account snapshot |
-| GET | `/api/positions` | MT5 positions (ours = magic `144021`) |
-| POST | `/api/orders` | Paper or guarded live order |
-| POST | `/api/kill` | Halt, cancel orders, flatten positions |
+| GET | `/api/positions?mode=paper|live|all` | Paper and/or MT5 positions |
+| GET | `/api/pending` | Auric pending orders |
+| POST | `/api/risk/preview` | Broker-aware risk/lot/margin preview |
+| POST | `/api/orders` | Idempotent market/limit/stop paper or live order |
+| POST | `/api/kill` | Global-by-default halt, cancel and flatten |
 | POST | `/api/risk/reset` | Reset a halted engine |
 | GET | `/api/journal` | Recent journal entries |
 | GET | `/api/symbols` | All per-symbol engine states |
@@ -209,8 +214,9 @@ Do these before material capital or any public exposure:
 - [ ] Secrets: vault/secret-manager for MT5 + Telegram creds; **rotate the Telegram
       bot token that was previously stored in plaintext `.env`**
 - [ ] Persistence: PostgreSQL/TimescaleDB for journal, Redis fan-out for ticks
-- [ ] Idempotency: durable `client_order_id` dedupe (current check is in-memory risk only)
-- [ ] Broker details: filling-mode negotiation, daily-P&L from broker history, news-calendar guard
+- [x] Idempotency: durable `client_order_id` dedupe in SQLite
+- [x] Broker details: symbol precision/volume/filling normalization and order preflight
+- [ ] Broker reconciliation worker + verified economic-news calendar guard
 - [ ] Ops: reverse-proxy TLS, rate limits, structured logs/alerts, backup/restore drill
 - [ ] Release: `npm audit` + `pip-audit`, full test suite green, independent deploy review
 

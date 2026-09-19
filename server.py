@@ -24,6 +24,19 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from engine import (STRATEGIES, SIZERS, Journal, RiskManager, atr, backtest,
                     indicators, monte_carlo, optimize, position_size, signal)
+from execution_v2 import (
+    ExecutionLedger,
+    PaperBroker,
+    choose_filling,
+    fallback_spec,
+    normalize_price,
+    normalize_volume,
+    position_size_for_risk,
+    risk_per_lot,
+    spec_from_info,
+    spec_payload,
+    spread_points,
+)
 
 logger = logging.getLogger("auric")
 
@@ -33,9 +46,22 @@ TD_SYMBOL = os.getenv("TWELVE_DATA_SYMBOL", "XAU/USD")
 TD_KEY = os.getenv("TWELVE_DATA_API_KEY", "")
 SOURCE = os.getenv("MARKET_DATA_SOURCE", "auto").lower()
 LIVE_ENABLED = os.getenv("ENABLE_LIVE_TRADING", "false").lower() == "true"
+# Manual live execution and autonomous live execution are deliberately separate.
+AUTO_LIVE_ENABLED = os.getenv("ENABLE_AUTO_LIVE_TRADING", "false").lower() == "true"
 LIVE_API_KEY = os.getenv("AURIC_LIVE_API_KEY", "")
 MAX_LOT = float(os.getenv("MAX_LOT", "1.0"))
 MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "500.0"))
+MAX_SPREAD_POINTS = float(os.getenv("MAX_SPREAD_POINTS", "80"))
+DEFAULT_SPREAD_LIMITS = {"XAUUSD": 80.0, "BTCUSD": 1500.0, "EURUSD": 30.0}
+
+def max_spread_points_for(symbol: str) -> float:
+    specific = os.getenv(f"MAX_SPREAD_POINTS_{symbol.upper()}")
+    if specific:
+        return float(specific)
+    generic = os.getenv("MAX_SPREAD_POINTS")
+    if generic:
+        return float(generic)
+    return DEFAULT_SPREAD_LIMITS.get(symbol.upper(), MAX_SPREAD_POINTS)
 
 if LIVE_ENABLED:
     logger.warning(
@@ -71,7 +97,13 @@ latest = {"symbol": SYMBOL, "bid": 0.0, "ask": 0.0, "price": 0.0, "spread": 0.0,
 latest_by_symbol: dict[str, dict] = {}
 feed_task: asyncio.Task | None = None
 mt5_ready = False
-risk = RiskManager(daily_loss=MAX_DAILY_LOSS, max_lot=MAX_LOT)
+# Portfolio risk is symbol-agnostic; spread is checked separately against each
+# instrument's point-based threshold.
+risk = RiskManager(
+    daily_loss=MAX_DAILY_LOSS,
+    max_lot=MAX_LOT,
+    spread_guard=1e12,
+)
 
 def _require_live_auth(request: Request) -> None:
     """Fail closed for live mutations unless an explicit API key is configured."""
@@ -81,6 +113,8 @@ def _require_live_auth(request: Request) -> None:
     if not supplied or not hmac.compare_digest(supplied, LIVE_API_KEY):
         raise HTTPException(401, "Invalid or missing live execution key")
 journal = Journal(str(ROOT / "auric.db"))
+execution_ledger = ExecutionLedger(str(ROOT / "auric.db"))
+paper_broker = PaperBroker()
 
 MAGIC = 144021
 ENGINE_CONFIG = {
@@ -146,11 +180,23 @@ ENGINES: dict[str, SymbolEngine] = {}  # populated in lifespan()
 class OrderRequest(BaseModel):
     side: Literal["buy", "sell"]
     lots: float = Field(gt=0, le=100)
+    order_type: Literal["market", "limit", "stop"] = "market"
+    entry_price: float | None = Field(default=None, gt=0)
     stop_loss: float | None = Field(default=None, gt=0)
     take_profit: float | None = Field(default=None, gt=0)
     mode: Literal["paper", "live"] = "paper"
     symbol: str = SYMBOL
     client_order_id: str = Field(min_length=8, max_length=80)
+
+
+class RiskPreviewRequest(BaseModel):
+    symbol: str = SYMBOL
+    side: Literal["buy", "sell"] = "buy"
+    entry: float = Field(gt=0)
+    stop: float = Field(gt=0)
+    target: float | None = Field(default=None, gt=0)
+    risk_pct: float = Field(default=0.5, gt=0, le=10)
+    risk_amount: float | None = Field(default=None, gt=0)
 
 class BacktestRequest(BaseModel):
     candles: list[dict]
@@ -235,6 +281,27 @@ async def twelve_data_tick(client: httpx.AsyncClient):
             "spread": 0.0, "source": "Twelve Data", "timestamp": int(time.time() * 1000)}
 
 async def broadcast(data: dict):
+    # Paper positions and pending orders are advanced by the same normalized
+    # market ticks used by the UI, so paper mode has real lifecycle semantics.
+    events = paper_broker.on_tick(
+        data.get("symbol", SYMBOL),
+        float(data.get("bid", 0) or 0),
+        float(data.get("ask", 0) or 0),
+    )
+    for event in events:
+        if event.get("type") == "close":
+            journal.add(
+                mode="paper",
+                symbol=event["symbol"],
+                side=event["side"],
+                lots=event["lots"],
+                entry=event["entry"],
+                exit=event["exit"],
+                pnl=event["pnl"],
+                strategy="manual",
+                reason=f"Paper {event.get('reason', 'exit')}",
+                raw={"ticket": event["ticket"]},
+            )
     stale = []
     message = json.dumps({"type": "tick", **data})
     for ws in tuple(clients):
@@ -247,8 +314,11 @@ async def broadcast(data: dict):
 
 async def market_loop():
     global latest
-    # demo per symbol
-    demos = {sym: 5000.0 for sym in ALL_SYMBOLS}
+    # Honest deterministic-ish fallback scales per asset instead of pretending
+    # every symbol trades like gold.
+    demos = {"XAUUSD": 5000.0, "BTCUSD": 97000.0, "EURUSD": 1.0850}
+    demo_half_spread = {"XAUUSD": 0.09, "BTCUSD": 4.0, "EURUSD": 0.00005}
+    demo_move = {"XAUUSD": 0.45, "BTCUSD": 18.0, "EURUSD": 0.00008}
     async with httpx.AsyncClient() as client:
         await init_mt5()
         while True:
@@ -273,11 +343,14 @@ async def market_loop():
                         except Exception:
                             pass
                 if tick is None:
-                    demo_price = demos[sym]
-                    demo_price = max(1, demo_price + random.uniform(-0.45, 0.45))
+                    demo_price = demos.get(sym, 100.0)
+                    delta = demo_move.get(sym, max(demo_price * 0.0001, 0.00001))
+                    floor = 0.00001 if demo_price < 10 else 1.0
+                    demo_price = max(floor, demo_price + random.uniform(-delta, delta))
                     demos[sym] = demo_price
-                    tick = {"symbol": sym, "bid": demo_price - 0.09, "ask": demo_price + 0.09,
-                            "price": demo_price, "spread": 0.18, "source": "Demo",
+                    half = demo_half_spread.get(sym, max(demo_price * 0.00002, 0.00001))
+                    tick = {"symbol": sym, "bid": demo_price - half, "ask": demo_price + half,
+                            "price": demo_price, "spread": half * 2, "source": "Demo",
                             "timestamp": int(time.time() * 1000)}
                 overall_latest[sym] = tick
                 await broadcast(tick)
@@ -287,6 +360,13 @@ async def market_loop():
             await asyncio.sleep(0.5)
 
 def engine_snapshot():
+    # V2 uses one SymbolEngine implementation for every symbol.  The legacy
+    # primary-engine structures remain for backward compatibility only.
+    if SYMBOL in ENGINES:
+        snap = ENGINES[SYMBOL].snapshot()
+        snap["manualLiveEnabled"] = LIVE_ENABLED
+        snap["autoLiveEnabled"] = AUTO_LIVE_ENABLED
+        return snap
     running = (ENGINE_CONFIG["enabled"]
                and ENGINE_STATE["status"] not in ("stopped", "disabled",
                                                    "mt5_offline", "halted",
@@ -306,7 +386,9 @@ def engine_snapshot():
         "config": {k: ENGINE_CONFIG[k] for k in
                    ("trail_atr", "confirm_min", "pyramid_frac", "max_pyramid")},
         "risk": {"halted": risk.halted, "realized": round(risk.realized, 2),
-                 "dailyLoss": MAX_DAILY_LOSS},
+                 "dailyLoss": MAX_DAILY_LOSS, "maxSpreadPoints": MAX_SPREAD_POINTS},
+        "manualLiveEnabled": LIVE_ENABLED,
+        "autoLiveEnabled": AUTO_LIVE_ENABLED,
         "kronos": {
             "enabled": KRONOS_CONFIRM,
             "available": KRONOS_OK,
@@ -332,7 +414,14 @@ async def update_realized():
         return
     start = datetime.combine(datetime.now().date(), dtime.min)
     deals = await asyncio.to_thread(mt5.history_deals_get, start, datetime.now()) or []
-    risk.realized = sum(float(d.profit or 0.0) for d in deals if d.magic == MAGIC)
+    risk.realized = sum(
+        float(getattr(d, "profit", 0.0) or 0.0)
+        + float(getattr(d, "commission", 0.0) or 0.0)
+        + float(getattr(d, "swap", 0.0) or 0.0)
+        + float(getattr(d, "fee", 0.0) or 0.0)
+        for d in deals
+        if getattr(d, "magic", None) == MAGIC
+    )
 
 def confirmations(candles, ind=None):
     bull = bear = 0
@@ -731,82 +820,57 @@ async def engine_loop():
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global feed_task, engine_task, kronos_task, mt5_ready
-    # Init MT5 first so symbols are selected
     await init_mt5()
     feed_task = asyncio.create_task(market_loop())
-    engine_task = asyncio.create_task(engine_loop())
-    kronos_task = asyncio.create_task(kronos_forecast_loop())
+    # V2 retires the duplicate legacy primary engine loop.  Every tracked
+    # symbol, including XAUUSD, now uses SymbolEngine.
+    engine_task = None
+    kronos_task = None
 
-    # ── Start multi-symbol engines ────────────────────────────────────────
     mt5_ref = {"ok": mt5_ready}
-    # Ensure MT5 ref is accurate immediately after init
-    if mt5_ready:
-        mt5_ref["ok"] = True
 
-    # Patch mt5_ref when MT5 connects — use a simple polling wrapper
     async def _sync_mt5_ref():
         while True:
-            if mt5_ready and not mt5_ref["ok"]:
-                mt5_ref["ok"] = True
+            mt5_ref["ok"] = bool(mt5_ready)
             await asyncio.sleep(2)
-    asyncio.create_task(_sync_mt5_ref())
 
+    sync_task = asyncio.create_task(_sync_mt5_ref())
     for sym in ALL_SYMBOLS:
-        if sym == SYMBOL:
-            # For the primary symbol, reuse existing single-symbol state
-            # but create a multi-engine wrapper for the /api/symbols endpoint
-            eng = SymbolEngine(
-                symbol=sym, mt5_mod=mt5, mt5_ready_ref=mt5_ref,
-                magic=MAGIC, live_enabled=LIVE_ENABLED,
-                max_lot=MAX_LOT, max_daily_loss=MAX_DAILY_LOSS,
-                journal=journal, tg_notify_fn=tg_notify,
-                kronos_engine_mod=kronos_engine, kronos_ok=KRONOS_OK,
-                mt5_timeframes=MT5_TIMEFRAMES, engine_mod=None,
-            )
-            # Share state with the primary single-symbol engine by reference
-            # so /api/engine and /api/symbols/XAUUSD never drift apart.
-            eng.config = ENGINE_CONFIG
-            eng.state = ENGINE_STATE
-            eng.kronos_cache = KRONOS_CACHE
-        else:
-            eng = SymbolEngine(
-                symbol=sym, mt5_mod=mt5, mt5_ready_ref=mt5_ref,
-                magic=MAGIC, live_enabled=LIVE_ENABLED,
-                max_lot=MAX_LOT, max_daily_loss=MAX_DAILY_LOSS,
-                journal=journal, tg_notify_fn=tg_notify,
-                kronos_engine_mod=kronos_engine, kronos_ok=KRONOS_OK,
-                mt5_timeframes=MT5_TIMEFRAMES, engine_mod=None,
-            )
-            eng.enable()
+        eng = SymbolEngine(
+            symbol=sym,
+            mt5_mod=mt5,
+            mt5_ready_ref=mt5_ref,
+            magic=MAGIC,
+            live_enabled=AUTO_LIVE_ENABLED,
+            max_lot=MAX_LOT,
+            max_daily_loss=MAX_DAILY_LOSS,
+            journal=journal,
+            tg_notify_fn=tg_notify,
+            kronos_engine_mod=kronos_engine,
+            kronos_ok=KRONOS_OK,
+            mt5_timeframes=MT5_TIMEFRAMES,
+            engine_mod=None,
+        )
         ENGINES[sym] = eng
+        # Start background tasks for every symbol; enable/disable only gates
+        # strategy execution and never destroys the task lifecycle.
+        eng.start()
 
-    # Start non-primary engines (primary already has engine_loop + kronos_forecast_loop)
-    for sym, eng in ENGINES.items():
-        if sym != SYMBOL and eng.config["enabled"]:
-            eng.start()
-
-    # Ensure all symbols are selected in MT5 immediately
-    if mt5_ready and mt5:
-        for sym in ALL_SYMBOLS:
-            try:
-                asyncio.create_task(asyncio.to_thread(mt5.symbol_select, sym, True))
-            except Exception:
-                pass
-
-    logger.info("Multi-symbol engine started: %s", list(ENGINES.keys()))
+    logger.info(
+        "Auric V2 engines started: %s | manual_live=%s | auto_live=%s",
+        list(ENGINES.keys()), LIVE_ENABLED, AUTO_LIVE_ENABLED,
+    )
     yield
 
-    feed_task.cancel()
-    if engine_task:
-        engine_task.cancel()
-    if kronos_task:
-        kronos_task.cancel()
+    if feed_task:
+        feed_task.cancel()
+    sync_task.cancel()
     for eng in ENGINES.values():
         eng.stop()
     if mt5_ready and mt5:
         mt5.shutdown()
 
-app = FastAPI(title="AuricTerminal Gateway", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="AuricTerminal Gateway", version="2.0.0", lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -838,8 +902,14 @@ async def terminal():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "source": latest.get("source"), "liveTrading": LIVE_ENABLED,
-            "symbol": SYMBOL, "timestamp": int(time.time() * 1000)}
+    return {
+        "ok": True,
+        "source": latest.get("source"),
+        "liveTrading": LIVE_ENABLED,
+        "autoLiveTrading": AUTO_LIVE_ENABLED,
+        "symbol": SYMBOL,
+        "timestamp": int(time.time() * 1000),
+    }
 
 @app.get("/api/quote")
 async def quote():
@@ -1008,52 +1078,54 @@ async def symbol_metrics(symbol: str):
     }}
 
 @app.post("/api/symbols/{symbol}/start")
-async def symbol_start(symbol: str):
+async def symbol_start(symbol: str, request: Request):
     sym = symbol.upper()
     if sym not in ENGINES:
         raise HTTPException(404, f"Symbol {sym} not tracked")
-    eng = ENGINES[sym]
-    eng.enable()
-    if sym == SYMBOL:
-        ENGINE_CONFIG["enabled"] = True
-        ENGINE_STATE["status"] = "starting"
-    return eng.snapshot()
+    if AUTO_LIVE_ENABLED:
+        _require_live_auth(request)
+    ENGINES[sym].enable()
+    return ENGINES[sym].snapshot()
+
 
 @app.post("/api/symbols/{symbol}/stop")
 async def symbol_stop(symbol: str):
     sym = symbol.upper()
     if sym not in ENGINES:
         raise HTTPException(404, f"Symbol {sym} not tracked")
-    eng = ENGINES[sym]
-    eng.disable()
-    if sym == SYMBOL:
-        ENGINE_CONFIG["enabled"] = False
-        ENGINE_STATE["status"] = "stopped"
-    return eng.snapshot()
+    ENGINES[sym].disable()
+    return ENGINES[sym].snapshot()
+
 
 @app.get("/api/symbols/all/kronos")
 async def all_kronos():
-    """Get Kronos forecast for every symbol."""
-    return {"symbols": {s: ENGINES[s].kronos_cache for s in ALL_SYMBOLS if s in ENGINES}}
+    return {"symbols": {sym: ENGINES[sym].kronos_cache for sym in ALL_SYMBOLS if sym in ENGINES}}
+
 
 @app.post("/api/engine/start")
-async def engine_start():
-    ENGINE_CONFIG["enabled"] = True
-    ENGINE_STATE["status"] = "starting"
-    ENGINE_STATE["error"] = None
+async def engine_start(request: Request):
+    if AUTO_LIVE_ENABLED:
+        _require_live_auth(request)
+    if SYMBOL not in ENGINES:
+        raise HTTPException(503, "Primary engine is not initialized")
+    ENGINES[SYMBOL].enable()
     return engine_snapshot()
+
 
 @app.post("/api/engine/stop")
 async def engine_stop():
-    ENGINE_CONFIG["enabled"] = False
-    ENGINE_STATE["status"] = "stopped"
+    if SYMBOL in ENGINES:
+        ENGINES[SYMBOL].disable()
     return engine_snapshot()
+
 
 @app.post("/api/engine/reset")
 async def engine_reset():
     risk.halted = False
-    ENGINE_STATE["error"] = None
+    for eng in ENGINES.values():
+        eng.reset_risk()
     return engine_snapshot()
+
 
 @app.get("/api/account")
 async def account():
@@ -1068,29 +1140,93 @@ async def account():
             "marginLevel": info.margin_level, "currency": info.currency}
 
 @app.get("/api/positions")
-async def positions(symbol: str | None = None):
-    if not mt5_ready or not mt5:
-        if symbol:
-            return {"symbol": symbol.upper(), "positions": []}
-        return {"positions": []}
-    rows = await asyncio.to_thread(mt5.positions_get) or []
-    ours = [p for p in rows if p.magic == MAGIC]
-    if symbol:
-        sym = symbol.upper()
-        ours = [p for p in ours if p.symbol == sym]
-        return {"symbol": sym, "positions": [{"ticket": p.ticket, "symbol": p.symbol,
-                 "side": "buy" if p.type == mt5.POSITION_TYPE_BUY else "sell",
-                 "lots": p.volume, "entry": p.price_open, "market": p.price_current,
-                 "sl": p.sl, "tp": p.tp, "pnl": p.profit} for p in ours]}
-    return {"positions": [{"ticket": p.ticket, "symbol": p.symbol,
-             "side": "buy" if p.type == mt5.POSITION_TYPE_BUY else "sell",
-             "lots": p.volume, "entry": p.price_open, "market": p.price_current,
-             "sl": p.sl, "tp": p.tp, "pnl": p.profit} for p in ours]}
+async def positions(
+    symbol: str | None = None,
+    mode: Literal["paper", "live", "all"] = "all",
+):
+    sym = symbol.upper() if symbol else None
+    out: list[dict] = []
+    if mode in ("paper", "all"):
+        out.extend(paper_broker.positions(sym))
+    if mode in ("live", "all") and mt5_ready and mt5:
+        rows = await asyncio.to_thread(mt5.positions_get) or []
+        ours = [p for p in rows if p.magic == MAGIC and (sym is None or p.symbol == sym)]
+        out.extend([{
+            "ticket": p.ticket, "symbol": p.symbol,
+            "side": "buy" if p.type == mt5.POSITION_TYPE_BUY else "sell",
+            "lots": p.volume, "entry": p.price_open, "market": p.price_current,
+            "sl": p.sl, "tp": p.tp, "pnl": p.profit, "mode": "live",
+        } for p in ours])
+    payload = {"positions": out}
+    if sym:
+        payload["symbol"] = sym
+    return payload
+
+
+@app.get("/api/pending")
+async def pending_orders(symbol: str | None = None, mode: Literal["paper", "live", "all"] = "all"):
+    sym = symbol.upper() if symbol else None
+    out = []
+    if mode in ("paper", "all"):
+        out.extend(paper_broker.pending(sym))
+    if mode in ("live", "all") and mt5_ready and mt5:
+        rows = await asyncio.to_thread(mt5.orders_get) or []
+        for p in rows:
+            if getattr(p, "magic", None) != MAGIC or (sym and p.symbol != sym):
+                continue
+            out.append({
+                "ticket": p.ticket, "symbol": p.symbol, "lots": p.volume_current,
+                "entry": p.price_open, "sl": p.sl, "tp": p.tp, "mode": "live",
+            })
+    return {"orders": out}
+
 
 @app.post("/api/risk/reset")
 async def reset_risk():
     risk.halted = False
+    for eng in ENGINES.values():
+        eng.reset_risk()
     return {"ok": True, "halted": False}
+
+
+@app.post("/api/risk/preview")
+async def risk_preview(req: RiskPreviewRequest):
+    sym = req.symbol.upper()
+    if sym not in ALL_SYMBOLS:
+        raise HTTPException(422, f"Symbol {sym} not tracked")
+    info = await asyncio.to_thread(mt5.symbol_info, sym) if mt5_ready and mt5 else None
+    spec = spec_from_info(sym, info) if info else fallback_spec(sym)
+    account_info = await asyncio.to_thread(mt5.account_info) if mt5_ready and mt5 else None
+    equity = float(account_info.equity) if account_info else 10000.0
+    effective_pct = req.risk_pct
+    if req.risk_amount is not None:
+        effective_pct = min(10.0, req.risk_amount / max(equity, 1e-9) * 100.0)
+    lots = position_size_for_risk(equity, effective_pct, req.entry, req.stop, spec, MAX_LOT)
+    risk_usd = risk_per_lot(req.entry, req.stop, spec) * lots
+    reward_usd = None
+    rr = None
+    if req.target is not None:
+        reward_per_lot = risk_per_lot(req.entry, req.target, spec)
+        reward_usd = reward_per_lot * lots
+        rr = reward_usd / risk_usd if risk_usd > 0 else None
+    margin = None
+    if mt5_ready and mt5:
+        typ = mt5.ORDER_TYPE_BUY if req.side == "buy" else mt5.ORDER_TYPE_SELL
+        try:
+            margin = await asyncio.to_thread(mt5.order_calc_margin, typ, sym, lots, req.entry)
+        except Exception:
+            margin = None
+    return {
+        "symbol": sym,
+        "equity": equity,
+        "lots": lots,
+        "riskUsd": round(risk_usd, 2),
+        "rewardUsd": round(reward_usd, 2) if reward_usd is not None else None,
+        "rr": round(rr, 2) if rr is not None else None,
+        "margin": round(float(margin), 2) if margin is not None else None,
+        "spec": spec_payload(spec),
+    }
+
 
 #: Canonical interval -> Yahoo Finance interval + suitable history period.
 _YF_INTERVAL_MAP = {
@@ -1269,98 +1405,243 @@ async def order(req: OrderRequest, request: Request):
     sym = req.symbol.upper()
     if sym not in ALL_SYMBOLS:
         raise HTTPException(422, f"Symbol {sym} not tracked")
+    if req.order_type != "market" and req.entry_price is None:
+        raise HTTPException(422, "Limit/stop orders require entry_price")
     if req.lots > MAX_LOT:
-        raise HTTPException(422, f"Lot size exceeds server risk limit ({MAX_LOT})")
-    open_rows = []
-    if mt5_ready and mt5:
-        open_rows = list(await asyncio.to_thread(mt5.positions_get, symbol=sym) or [])
-    # Per-symbol tick lookup: live cache first, primary mirror as fallback.
+        raise HTTPException(422, f"Lot size exceeds server hard cap ({MAX_LOT})")
+
     tick_info = latest_by_symbol.get(sym, {})
-    if not tick_info and isinstance(latest, dict) and latest.get("symbol") == sym:
-        tick_info = latest
-    spread = float(tick_info.get("spread", 0) or 0)
-    decision = risk.check(req.lots, len(open_rows), sum(float(p.volume) for p in open_rows), spread)
+    if not tick_info and isinstance(latest, dict):
+        if latest.get("symbol") == sym:
+            tick_info = latest
+        elif isinstance(latest.get(sym), dict):
+            tick_info = latest[sym]
+    bid = float(tick_info.get("bid", 0) or 0)
+    ask = float(tick_info.get("ask", 0) or 0)
+    if bid <= 0 or ask <= 0:
+        raise HTTPException(503, "No market price available yet")
+
+    info = await asyncio.to_thread(mt5.symbol_info, sym) if mt5_ready and mt5 else None
+    spec = spec_from_info(sym, info) if info else fallback_spec(sym)
+    lots = normalize_volume(req.lots, spec, MAX_LOT)
+    sp_points = spread_points(bid, ask, spec)
+    spread_limit = max_spread_points_for(sym)
+    if sp_points > spread_limit:
+        raise HTTPException(
+            403,
+            f"Spread guard active ({sp_points:.1f} pts > {spread_limit:.1f} pts for {sym})",
+        )
+    if req.mode == "paper":
+        positions_count = len(paper_broker.positions(sym))
+        exposure = sum(float(p["lots"]) for p in paper_broker.positions(sym))
+    else:
+        open_rows = list(await asyncio.to_thread(mt5.positions_get, symbol=sym) or []) if mt5_ready and mt5 else []
+        positions_count = len(open_rows)
+        exposure = sum(float(p.volume) for p in open_rows)
+    if req.mode == "live":
+        await update_realized()
+        if risk.realized <= -MAX_DAILY_LOSS:
+            risk.kill()
+    decision = risk.check(lots, positions_count, exposure, 0.0)
     if not decision["allowed"]:
         raise HTTPException(403, "; ".join(decision["reasons"]))
-    if req.mode == "paper":
-        # use demo/real tick price for this symbol
-        price = tick_info.get("ask" if req.side == "buy" else "bid")
-        if not price:
-            # fallback to primary-symbol mirror
-            if isinstance(latest, dict) and latest.get("symbol") == sym:
-                price = latest.get("ask" if req.side == "buy" else "bid")
-        if not price or price <= 0:
-            raise HTTPException(503, "No market price available yet")
-        journal.add(mode="paper", side=req.side, lots=req.lots, entry=price,
-                    strategy="manual", reason="Order ticket", raw=req.model_dump())
-        return {"accepted": True, "mode": "paper", "symbol": sym, "clientOrderId": req.client_order_id,
-                "fillPrice": price, "source": tick_info.get("source", latest.get("source") if isinstance(latest, dict) else "Demo")}
-    if not LIVE_ENABLED:
-        raise HTTPException(403, "Live execution is disabled on the server")
-    _require_live_auth(request)
-    if not mt5_ready or not mt5:
-        raise HTTPException(503, "MT5 terminal is not connected")
-    tick = await asyncio.to_thread(mt5.symbol_info_tick, sym)
-    if tick is None:
-        raise HTTPException(503, "No market tick available from MT5")
-    order_type = mt5.ORDER_TYPE_BUY if req.side == "buy" else mt5.ORDER_TYPE_SELL
-    price = tick.ask if req.side == "buy" else tick.bid
-    request = {"action": mt5.TRADE_ACTION_DEAL, "symbol": sym, "volume": req.lots,
-               "type": order_type, "price": price, "sl": req.stop_loss or 0.0,
-               "tp": req.take_profit or 0.0, "deviation": 20, "magic": MAGIC,
-               "comment": f"Auric {req.client_order_id[:18]}", "type_time": mt5.ORDER_TIME_GTC,
-               "type_filling": mt5.ORDER_FILLING_IOC}
-    result = await asyncio.to_thread(mt5.order_send, request)
-    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-        raise HTTPException(502, f"MT5 rejected order: {getattr(result, 'comment', 'unknown error')}")
-    journal.add(mode="live", side=req.side, lots=req.lots, entry=result.price,
-                strategy="manual", reason="MT5 market order", raw=req.model_dump())
-    return {"accepted": True, "mode": "live", "symbol": sym, "ticket": result.order,
-            "deal": result.deal, "fillPrice": result.price, "clientOrderId": req.client_order_id}
+
+    payload = req.model_dump()
+    if not execution_ledger.reserve(req.client_order_id, sym, req.mode, req.order_type, payload):
+        existing = execution_ledger.lookup(req.client_order_id)
+        raise HTTPException(409, f"Duplicate client_order_id ({existing.get('status') if existing else 'known'})")
+
+    try:
+        if req.mode == "paper":
+            result = paper_broker.place(
+                symbol=sym,
+                side=req.side,
+                lots=lots,
+                order_type=req.order_type,
+                bid=bid,
+                ask=ask,
+                entry_price=req.entry_price,
+                stop_loss=req.stop_loss,
+                take_profit=req.take_profit,
+                client_order_id=req.client_order_id,
+                spec=spec,
+            )
+            journal.add(
+                mode="paper", symbol=sym, side=req.side, lots=lots,
+                entry=result.get("fillPrice") or req.entry_price,
+                strategy="manual",
+                reason=f"Paper {req.order_type} order",
+                raw=payload,
+            )
+            response = {
+                **result,
+                "mode": "paper",
+                "symbol": sym,
+                "clientOrderId": req.client_order_id,
+                "source": tick_info.get("source", "Demo"),
+            }
+            execution_ledger.complete(req.client_order_id, response, result.get("ticket"))
+            return response
+
+        if not LIVE_ENABLED:
+            raise HTTPException(403, "Manual live execution is disabled on the server")
+        _require_live_auth(request)
+        if not mt5_ready or not mt5:
+            raise HTTPException(503, "MT5 terminal is not connected")
+
+        tick = await asyncio.to_thread(mt5.symbol_info_tick, sym)
+        info = await asyncio.to_thread(mt5.symbol_info, sym)
+        if tick is None or info is None:
+            raise HTTPException(503, "MT5 symbol/tick unavailable")
+        spec = spec_from_info(sym, info)
+        lots = normalize_volume(lots, spec, MAX_LOT)
+        is_buy = req.side == "buy"
+        pending = req.order_type != "market"
+        if req.order_type == "market":
+            action = mt5.TRADE_ACTION_DEAL
+            typ = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
+            price = normalize_price(tick.ask if is_buy else tick.bid, spec)
+        else:
+            action = mt5.TRADE_ACTION_PENDING
+            if req.order_type == "limit":
+                typ = mt5.ORDER_TYPE_BUY_LIMIT if is_buy else mt5.ORDER_TYPE_SELL_LIMIT
+            else:
+                typ = mt5.ORDER_TYPE_BUY_STOP if is_buy else mt5.ORDER_TYPE_SELL_STOP
+            price = normalize_price(float(req.entry_price), spec)
+
+        mt5_request = {
+            "action": action,
+            "symbol": sym,
+            "volume": lots,
+            "type": typ,
+            "price": price,
+            "sl": normalize_price(req.stop_loss, spec) if req.stop_loss else 0.0,
+            "tp": normalize_price(req.take_profit, spec) if req.take_profit else 0.0,
+            "deviation": 20,
+            "magic": MAGIC,
+            "comment": f"AuricV2 {req.client_order_id[:16]}",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": choose_filling(mt5, spec, pending=pending),
+        }
+        check = await asyncio.to_thread(mt5.order_check, mt5_request)
+        valid_codes = {0, getattr(mt5, "TRADE_RETCODE_DONE", 10009), getattr(mt5, "TRADE_RETCODE_PLACED", 10008)}
+        if check is not None and getattr(check, "retcode", 0) not in valid_codes:
+            raise HTTPException(422, f"MT5 preflight rejected order: {getattr(check, 'comment', 'unknown')}")
+        result = await asyncio.to_thread(mt5.order_send, mt5_request)
+        accepted_codes = {getattr(mt5, "TRADE_RETCODE_DONE", 10009), getattr(mt5, "TRADE_RETCODE_PLACED", 10008)}
+        if result is None or result.retcode not in accepted_codes:
+            raise HTTPException(502, f"MT5 rejected order: {getattr(result, 'comment', 'unknown error')}")
+
+        response = {
+            "accepted": True,
+            "status": "pending" if pending else "filled",
+            "mode": "live",
+            "symbol": sym,
+            "ticket": result.order,
+            "deal": getattr(result, "deal", None),
+            "fillPrice": getattr(result, "price", None) if not pending else None,
+            "entryPrice": price,
+            "clientOrderId": req.client_order_id,
+        }
+        journal.add(
+            mode="live", symbol=sym, side=req.side, lots=lots,
+            entry=getattr(result, "price", None) or price,
+            strategy="manual", reason=f"MT5 {req.order_type} order", raw=payload,
+        )
+        execution_ledger.complete(req.client_order_id, response, result.order)
+        return response
+    except HTTPException as exc:
+        execution_ledger.fail(req.client_order_id, str(exc.detail))
+        raise
+    except Exception as exc:
+        execution_ledger.fail(req.client_order_id, str(exc))
+        raise
+
 
 @app.post("/api/kill")
-async def kill_all(request: Request, symbol: str = SYMBOL, mode: Literal["paper", "live"] = "paper"):
+async def kill_all(
+    request: Request,
+    symbol: str = "ALL",
+    mode: Literal["paper", "live"] = "paper",
+):
     sym = symbol.upper()
-    if sym not in ALL_SYMBOLS:
+    if sym != "ALL" and sym not in ALL_SYMBOLS:
         raise HTTPException(422, f"Symbol {sym} not tracked")
+    target = None if sym == "ALL" else sym
+
     risk.kill()
+    for eng in ENGINES.values():
+        eng.risk.kill()
+
     if mode == "paper":
-        journal.add(mode="paper", side="system", strategy="risk", reason=f"Kill switch activated for {sym}")
-        return {"ok": True, "mode": "paper", "symbol": sym, "closed": 0, "cancelled": 0, "halted": True}
+        closed, cancelled = paper_broker.flatten(target)
+        journal.add(
+            mode="paper", side="system", strategy="risk",
+            reason=f"GLOBAL kill switch activated for {sym}",
+            raw={"closed": closed, "cancelled": cancelled},
+        )
+        return {
+            "ok": True, "mode": "paper", "symbol": sym,
+            "closed": closed, "cancelled": cancelled, "halted": True,
+        }
+
     if not LIVE_ENABLED:
         raise HTTPException(403, "Live execution is disabled on the server")
     _require_live_auth(request)
     if not mt5_ready or not mt5:
         raise HTTPException(503, "MT5 terminal is not connected")
+
     closed = cancelled = 0
-    for pending in list(await asyncio.to_thread(mt5.orders_get, symbol=sym) or []):
-        if getattr(pending, "magic", None) != MAGIC:
+    pending_rows = list(await asyncio.to_thread(mt5.orders_get) or [])
+    for pending in pending_rows:
+        if getattr(pending, "magic", None) != MAGIC or (target and pending.symbol != target):
             continue
-        result = await asyncio.to_thread(mt5.order_send, {"action": mt5.TRADE_ACTION_REMOVE,
-                                                           "order": pending.ticket})
+        result = await asyncio.to_thread(
+            mt5.order_send,
+            {"action": mt5.TRADE_ACTION_REMOVE, "order": pending.ticket},
+        )
         cancelled += int(bool(result and result.retcode == mt5.TRADE_RETCODE_DONE))
-    for p in list(await asyncio.to_thread(mt5.positions_get, symbol=sym) or []):
-        if p.magic != MAGIC:
+
+    position_rows = list(await asyncio.to_thread(mt5.positions_get) or [])
+    for p in position_rows:
+        if p.magic != MAGIC or (target and p.symbol != target):
             continue
         tick = await asyncio.to_thread(mt5.symbol_info_tick, p.symbol)
-        if tick is None:
+        info = await asyncio.to_thread(mt5.symbol_info, p.symbol)
+        if tick is None or info is None:
             continue
+        spec = spec_from_info(p.symbol, info)
         is_buy = p.type == mt5.POSITION_TYPE_BUY
-        request = {"action": mt5.TRADE_ACTION_DEAL, "symbol": p.symbol,
-                   "position": p.ticket, "volume": p.volume,
-                   "type": mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
-                   "price": tick.bid if is_buy else tick.ask, "deviation": 30,
-                   "magic": MAGIC, "comment": f"Auric kill switch {sym}",
-                   "type_time": mt5.ORDER_TIME_GTC, "type_filling": mt5.ORDER_FILLING_IOC}
-        result = await asyncio.to_thread(mt5.order_send, request)
+        close_request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": p.symbol,
+            "position": p.ticket,
+            "volume": normalize_volume(p.volume, spec),
+            "type": mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
+            "price": normalize_price(tick.bid if is_buy else tick.ask, spec),
+            "deviation": 30,
+            "magic": MAGIC,
+            "comment": "AuricV2 GLOBAL KILL",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": choose_filling(mt5, spec),
+        }
+        result = await asyncio.to_thread(mt5.order_send, close_request)
         closed += int(bool(result and result.retcode == mt5.TRADE_RETCODE_DONE))
-    journal.add(mode="live", side="system", strategy="risk", reason=f"Kill switch activated for {sym}",
-                raw={"closed": closed, "cancelled": cancelled})
+
+    journal.add(
+        mode="live", side="system", strategy="risk",
+        reason=f"GLOBAL kill switch activated for {sym}",
+        raw={"closed": closed, "cancelled": cancelled},
+    )
     await tg_notify(
-        f"<b>Auric KILL SWITCH {sym}</b>\n"
+        f"<b>Auric V2 GLOBAL KILL {sym}</b>\n"
         f"Closed: {closed} | Cancelled: {cancelled}\n"
-        f"All positions flattened.")
-    return {"ok": True, "mode": "live", "symbol": sym, "closed": closed, "cancelled": cancelled, "halted": True}
+        "All Auric positions/orders targeted by the kill command were processed."
+    )
+    return {
+        "ok": True, "mode": "live", "symbol": sym,
+        "closed": closed, "cancelled": cancelled, "halted": True,
+    }
 
 
 # --- Kronos forecasting (local candle datasets) -----------------------------

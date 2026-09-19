@@ -1,74 +1,64 @@
 import { useMemo } from 'react'
+import { Info } from 'lucide-react'
 import { fmtPrice } from '../lib/format'
 import type { Quote } from '../lib/types'
 
 export function DepthPanel({ quote }: { quote: Quote }) {
-  const p = quote.price || 5000.0
-  const sp = quote.spread || 0.18
+  const p = quote.price || 0
+  const sp = Math.max(quote.spread || 0, p ? p * 0.00002 : 0.01)
 
-  // Generate realistic deterministic depth levels relative to current tick
-  const depth = useMemo(() => {
-    const bids = [
-      { price: p - sp * 0.5, size: 2.4, total: 2.4 },
-      { price: p - sp * 1.5, size: 4.8, total: 7.2 },
-      { price: p - sp * 2.8, size: 8.5, total: 15.7 },
-      { price: p - sp * 4.2, size: 12.0, total: 27.7 },
-      { price: p - sp * 6.0, size: 18.2, total: 45.9 },
-    ]
-    const asks = [
-      { price: p + sp * 0.5, size: 1.8, total: 1.8 },
-      { price: p + sp * 1.6, size: 5.2, total: 7.0 },
-      { price: p + sp * 3.0, size: 7.9, total: 14.9 },
-      { price: p + sp * 4.5, size: 14.3, total: 29.2 },
-      { price: p + sp * 6.5, size: 19.5, total: 48.7 },
-    ]
-    return { bids, asks }
+  // This is intentionally an indicative ladder, not broker L2.  Until a broker
+  // depth adapter is connected we never label generated values as market depth.
+  const ladder = useMemo(() => {
+    const multipliers = [0.6, 1.5, 2.7, 4.1, 5.9]
+    const weights = [1.8, 3.7, 6.4, 9.2, 13.0]
+    return {
+      asks: multipliers.map((m, i) => ({ price: p + sp * m, weight: weights[i] })),
+      bids: multipliers.map((m, i) => ({ price: p - sp * m, weight: weights[i] })),
+    }
   }, [p, sp])
 
-  const maxTotal = 50.0
+  const max = 13
 
   return (
-    <div className="flex flex-col border-b border-ink-700/70 p-3 bg-ink-900/40">
-      <div className="flex items-center justify-between pb-2">
-        <span className="text-[10px] font-bold uppercase tracking-[0.1em] text-fg-400">Market Depth (DOM)</span>
-        <span className="rounded bg-ink-800 px-1.5 py-0.5 text-[9px] font-semibold text-gold-400">
-          L2 · Spread {(quote.spread || 0.18).toFixed(2)}
+    <section className="border-b border-ink-700/70 bg-ink-900/45 p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <div>
+          <div className="text-[9px] font-extrabold uppercase tracking-[0.12em] text-fg-400">Indicative Liquidity Ladder</div>
+          <div className="mt-0.5 flex items-center gap-1 text-[8px] text-fg-600">
+            <Info className="h-2.5 w-2.5" /> Generated from spread · not broker L2
+          </div>
+        </div>
+        <span className="rounded border border-ink-700 bg-ink-800 px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-[0.1em] text-fg-500">
+          SYNTHETIC
         </span>
       </div>
 
-      <div className="space-y-0.5 text-[10px]">
-        {/* Asks (Sells) reversed so lowest ask is at bottom */}
-        {depth.asks.slice().reverse().map((a, i) => (
-          <div key={`ask-${i}`} className="relative flex items-center justify-between py-0.5 px-1.5">
-            <div
-              className="absolute right-0 top-0 bottom-0 bg-bear-500/10 rounded-sm pointer-events-none"
-              style={{ width: `${(a.total / maxTotal) * 100}%` }}
-            />
-            <span className="tnum font-semibold text-bear-400 z-10">{fmtPrice(a.price)}</span>
-            <span className="tnum text-fg-400 z-10">{a.size.toFixed(1)}</span>
-            <span className="tnum text-fg-500 text-[9px] z-10">{a.total.toFixed(1)}</span>
-          </div>
+      <div className="space-y-px text-[9px]">
+        {ladder.asks.slice().reverse().map((a, i) => (
+          <Level key={`a-${i}`} price={a.price} weight={a.weight} max={max} ask />
         ))}
-
-        {/* Spread separator */}
-        <div className="my-1 flex items-center justify-between border-y border-ink-700/80 bg-ink-800/80 px-2 py-0.5 text-[9px] text-fg-400">
-          <span className="font-semibold text-fg-300">Spread</span>
-          <span className="tnum font-bold text-gold-400">{fmtPrice(quote.spread || 0.18)}</span>
+        <div className="my-1 flex items-center justify-between border-y border-ink-700/70 bg-ink-950/70 px-2 py-1">
+          <span className="text-[8px] font-bold uppercase tracking-[0.1em] text-fg-600">Spread</span>
+          <span className="tnum text-[9px] font-bold text-gold-300">{fmtPrice(quote.spread)}</span>
         </div>
-
-        {/* Bids (Buys) */}
-        {depth.bids.map((b, i) => (
-          <div key={`bid-${i}`} className="relative flex items-center justify-between py-0.5 px-1.5">
-            <div
-              className="absolute right-0 top-0 bottom-0 bg-bull-500/10 rounded-sm pointer-events-none"
-              style={{ width: `${(b.total / maxTotal) * 100}%` }}
-            />
-            <span className="tnum font-semibold text-bull-400 z-10">{fmtPrice(b.price)}</span>
-            <span className="tnum text-fg-400 z-10">{b.size.toFixed(1)}</span>
-            <span className="tnum text-fg-500 text-[9px] z-10">{b.total.toFixed(1)}</span>
-          </div>
+        {ladder.bids.map((b, i) => (
+          <Level key={`b-${i}`} price={b.price} weight={b.weight} max={max} ask={false} />
         ))}
       </div>
+    </section>
+  )
+}
+
+function Level({ price, weight, max, ask }: { price: number; weight: number; max: number; ask: boolean }) {
+  return (
+    <div className="relative flex h-5 items-center justify-between overflow-hidden rounded-sm px-2">
+      <div
+        className={`absolute inset-y-0 right-0 ${ask ? 'bg-bear-500/8' : 'bg-bull-500/8'}`}
+        style={{ width: `${Math.min(100, weight / max * 100)}%` }}
+      />
+      <span className={`relative tnum font-semibold ${ask ? 'text-bear-400' : 'text-bull-400'}`}>{fmtPrice(price)}</span>
+      <span className="relative tnum text-fg-600">{weight.toFixed(1)} rel</span>
     </div>
   )
 }

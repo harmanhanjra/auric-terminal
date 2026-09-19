@@ -68,7 +68,7 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-ink-950 text-fg-200 selection:bg-gold-400/20">
+    <div className="terminal-grid flex h-screen flex-col overflow-hidden bg-ink-950 text-fg-200 selection:bg-gold-400/20">
       <TopBar
         quote={quote}
         live={live}
@@ -78,7 +78,7 @@ export default function App() {
         onSelectSymbol={setActiveSymbol}
       />
       {/* Reliable grid: rail | main | aside — beautiful Bloomberg-inspired density */}
-      <div className="grid min-h-0 flex-1 grid-cols-[56px_minmax(0,1fr)_360px] overflow-hidden">
+      <div className="grid min-h-0 flex-1 grid-cols-[56px_minmax(0,1fr)_380px] overflow-hidden">
         <Rail view={view} onNavigate={openModule} />
 
         <div className="flex min-h-0 flex-col overflow-hidden border-r border-ink-700 bg-ink-950">
@@ -96,7 +96,7 @@ export default function App() {
           </div>
           <div className="min-h-0 flex-1 overflow-auto">
             <DepthPanel quote={quote} />
-            <EngineCard />
+            <EngineCard activeSymbol={activeSymbol} />
           </div>
         </aside>
       </div>

@@ -32,8 +32,8 @@ export function Dock({ live, onNavigate }: DockProps) {
 
   // Queries connected to backend endpoints
   const { data: positionsData, refetch: refetchPositions } = useQuery({
-    queryKey: ['positions'],
-    queryFn: api.positions,
+    queryKey: ['positions', live],
+    queryFn: () => api.positions(live ? 'live' : 'paper'),
     refetchInterval: 3000,
   })
 
