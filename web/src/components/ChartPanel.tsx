@@ -246,51 +246,6 @@ export function ChartPanel({ quote, activeSymbol = 'XAUUSD', onSelectSymbol }: C
     }
   }, [chartType])
 
-  useEffect(() => {
-    if (!candles.length || !chartRef.current) return
-
-    const rows = chartType === 'HeikinAshi' ? toHeikinAshi(candles) : candles
-
-    // Update main series
-    if (chartType === 'Line' && lineSeriesRef.current) {
-      lineSeriesRef.current.setData(
-        rows.map((c) => ({ time: toTime(c), value: c.close })),
-      )
-    } else if (chartType === 'Bar' && barSeriesRef.current) {
-      barSeriesRef.current.setData(
-        rows.map((c) => ({
-          time: toTime(c),
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-        })),
-      )
-    } else if (candleSeriesRef.current) {
-      candleSeriesRef.current.setData(
-        rows.map((c) => ({
-          time: toTime(c),
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-        })),
-      )
-    }
-
-    // Update volume series
-    if (histogramSeriesRef.current) {
-      histogramSeriesRef.current.setData(
-        rows.map((c) => ({ time: toTime(c), value: c.volume ?? 0 })),
-      )
-    }
-
-    // Update indicator series
-    updateIndicatorSeries(candles)
-
-    chartRef.current?.timeScale().fitContent()
-  }, [candles, chartType])
-
   const updateIndicatorSeries = useCallback((candles: Candle[]) => {
     if (!chartRef.current) return
 
@@ -376,6 +331,52 @@ export function ChartPanel({ quote, activeSymbol = 'XAUUSD', onSelectSymbol }: C
       }
     }
   }, [indicators])
+
+
+  useEffect(() => {
+    if (!candles.length || !chartRef.current) return
+
+    const rows = chartType === 'HeikinAshi' ? toHeikinAshi(candles) : candles
+
+    // Update main series
+    if (chartType === 'Line' && lineSeriesRef.current) {
+      lineSeriesRef.current.setData(
+        rows.map((c) => ({ time: toTime(c), value: c.close })),
+      )
+    } else if (chartType === 'Bar' && barSeriesRef.current) {
+      barSeriesRef.current.setData(
+        rows.map((c) => ({
+          time: toTime(c),
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+        })),
+      )
+    } else if (candleSeriesRef.current) {
+      candleSeriesRef.current.setData(
+        rows.map((c) => ({
+          time: toTime(c),
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+        })),
+      )
+    }
+
+    // Update volume series
+    if (histogramSeriesRef.current) {
+      histogramSeriesRef.current.setData(
+        rows.map((c) => ({ time: toTime(c), value: c.volume ?? 0 })),
+      )
+    }
+
+    // Update indicator series
+    updateIndicatorSeries(candles)
+
+    chartRef.current?.timeScale().fitContent()
+  }, [candles, chartType, updateIndicatorSeries])
 
   const calculateEMA = (candles: Candle[], period: number): { time: UTCTimestamp; value: number }[] => {
     if (candles.length === 0) return []
