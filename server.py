@@ -244,7 +244,7 @@ class NewsEventRequest(BaseModel):
     impact: Literal["low", "medium", "high"] = "high"
     start_ms: int
     end_ms: int
-    symbols: list[str] = ["ALL"]
+    symbols: list[str] = Field(default_factory=lambda: ["ALL"])
     source: str = Field(default="manual", max_length=80)
 
 
