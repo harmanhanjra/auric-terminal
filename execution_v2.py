@@ -378,7 +378,9 @@ class PaperBroker:
                 closed["exit"] = market
                 events.append({"type": "close", **closed})
                 del self._positions[ticket]
-        if events or any(v.get("symbol") == symbol for v in self._positions.values()):
+        # Persist structural state changes only; mark-to-market values are
+        # recomputed on the next tick after restart.
+        if events:
             self._persist()
         return events
 
