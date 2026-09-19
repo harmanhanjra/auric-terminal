@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import random
+import secrets
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, time as dtime
@@ -19,9 +20,18 @@ from typing import Literal
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from production_core import (
+    AuditLog,
+    BlackoutGuard,
+    ExecutionPolicy,
+    OperatorAuth,
+    ReconciliationState,
+    TokenBucketLimiter,
+    production_readiness,
+)
 from engine import (STRATEGIES, SIZERS, Journal, RiskManager, atr, backtest,
                     indicators, monte_carlo, optimize, position_size, signal)
 from execution_v2 import (
@@ -48,6 +58,7 @@ SOURCE = os.getenv("MARKET_DATA_SOURCE", "auto").lower()
 LIVE_ENABLED = os.getenv("ENABLE_LIVE_TRADING", "false").lower() == "true"
 # Manual live execution and autonomous live execution are deliberately separate.
 AUTO_LIVE_ENABLED = os.getenv("ENABLE_AUTO_LIVE_TRADING", "false").lower() == "true"
+ENVIRONMENT = os.getenv("AURIC_ENV", "development").lower()
 LIVE_API_KEY = os.getenv("AURIC_LIVE_API_KEY", "")
 MAX_LOT = float(os.getenv("MAX_LOT", "1.0"))
 MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "500.0"))
@@ -105,16 +116,28 @@ risk = RiskManager(
     spread_guard=1e12,
 )
 
-def _require_live_auth(request: Request) -> None:
-    """Fail closed for live mutations unless an explicit API key is configured."""
-    if not LIVE_API_KEY:
-        raise HTTPException(503, "Live execution requires AURIC_LIVE_API_KEY to be configured")
-    supplied = request.headers.get("x-auric-key", "")
-    if not supplied or not hmac.compare_digest(supplied, LIVE_API_KEY):
-        raise HTTPException(401, "Invalid or missing live execution key")
 journal = Journal(str(ROOT / "auric.db"))
 execution_ledger = ExecutionLedger(str(ROOT / "auric.db"))
 paper_broker = PaperBroker()
+execution_policy = ExecutionPolicy()
+operator_auth = OperatorAuth()
+rate_limiter = TokenBucketLimiter(
+    capacity=int(os.getenv("AURIC_RATE_LIMIT_BURST", "120")),
+    refill_per_sec=float(os.getenv("AURIC_RATE_LIMIT_PER_SECOND", "2")),
+)
+audit_log = AuditLog(str(ROOT / "auric.db"))
+blackout_guard = BlackoutGuard()
+reconciliation = ReconciliationState()
+reconciliation_task: asyncio.Task | None = None
+METRICS = {
+    "requests": 0,
+    "errors": 0,
+    "orders": 0,
+    "live_orders": 0,
+    "kills": 0,
+    "rate_limited": 0,
+    "auth_failures": 0,
+}
 
 MAGIC = 144021
 ENGINE_CONFIG = {
@@ -177,6 +200,11 @@ kronos_task: asyncio.Task | None = None
 from multi_engine import SymbolEngine, SYMBOLS as ALL_SYMBOLS, SYMBOL_PROPS
 ENGINES: dict[str, SymbolEngine] = {}  # populated in lifespan()
 
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=100)
+    password: str = Field(min_length=1, max_length=256)
+
+
 class OrderRequest(BaseModel):
     side: Literal["buy", "sell"]
     lots: float = Field(gt=0, le=100)
@@ -225,6 +253,102 @@ class KronosRequest(BaseModel):
     T: float = Field(default=1.0, gt=0, le=5)
     top_p: float = Field(default=0.9, gt=0, le=1)
     sample_count: int = Field(default=2, ge=1, le=10)
+
+
+def _bearer_token_from_headers(headers) -> str:
+    value = headers.get("authorization", "")
+    if value.lower().startswith("bearer "):
+        return value[7:].strip()
+    return ""
+
+
+def _actor_from_request(request: Request) -> str:
+    claims = getattr(request.state, "claims", None)
+    return str(claims.get("sub", "anonymous")) if isinstance(claims, dict) else "anonymous"
+
+
+def _require_live_auth(request: Request) -> None:
+    """Fail closed for live mutations unless an explicit API key is configured."""
+    if not LIVE_API_KEY:
+        raise HTTPException(503, "Live execution requires AURIC_LIVE_API_KEY to be configured")
+    supplied = request.headers.get("x-auric-key", "")
+    if not supplied or not hmac.compare_digest(supplied, LIVE_API_KEY):
+        raise HTTPException(401, "Invalid or missing live execution key")
+
+
+async def _portfolio_guard(symbol: str, proposed_lots: float, price: float, spec) -> dict:
+    """Cross-asset concentration guard measured in notional/equity."""
+    if not mt5_ready or not mt5:
+        return {"allowed": True, "reason": "Broker portfolio unavailable in paper mode"}
+    account_info = await asyncio.to_thread(mt5.account_info)
+    if account_info is None or float(account_info.equity) <= 0:
+        return {"allowed": False, "reason": "Account equity unavailable"}
+    equity = float(account_info.equity)
+    max_gross = float(os.getenv("MAX_GROSS_LEVERAGE", "3.0"))
+    max_symbol_pct = float(os.getenv("MAX_SYMBOL_NOTIONAL_PCT", "150"))
+    rows = list(await asyncio.to_thread(mt5.positions_get) or [])
+    gross = 0.0
+    symbol_notional = 0.0
+    for p in rows:
+        if getattr(p, "magic", None) != MAGIC:
+            continue
+        info = await asyncio.to_thread(mt5.symbol_info, p.symbol)
+        pspec = spec_from_info(p.symbol, info) if info else fallback_spec(p.symbol)
+        market = float(getattr(p, "price_current", 0.0) or getattr(p, "price_open", 0.0) or 0.0)
+        notional = abs(float(p.volume) * pspec.contract_size * market)
+        gross += notional
+        if p.symbol == symbol:
+            symbol_notional += notional
+    proposed = abs(float(proposed_lots) * spec.contract_size * float(price))
+    if gross + proposed > equity * max_gross:
+        return {"allowed": False, "reason": f"Gross exposure cap ({max_gross:.2f}x equity)"}
+    if symbol_notional + proposed > equity * (max_symbol_pct / 100.0):
+        return {"allowed": False, "reason": f"{symbol} concentration cap ({max_symbol_pct:.0f}% equity)"}
+    return {
+        "allowed": True,
+        "reason": "Portfolio exposure within limits",
+        "grossNotional": gross,
+        "proposedNotional": proposed,
+    }
+
+
+async def reconciliation_loop():
+    """Continuously reconcile recent Auric execution tickets against MT5 state/history."""
+    while True:
+        try:
+            if not mt5_ready or not mt5:
+                reconciliation.ok = not (LIVE_ENABLED or AUTO_LIVE_ENABLED)
+                reconciliation.broker_connected = False
+                reconciliation.error = None if reconciliation.ok else "MT5 unavailable"
+                reconciliation.last_sync_ms = int(time.time() * 1000)
+            else:
+                positions = list(await asyncio.to_thread(mt5.positions_get) or [])
+                orders = list(await asyncio.to_thread(mt5.orders_get) or [])
+                start = datetime.combine(datetime.now().date(), dtime.min)
+                hist_orders = list(await asyncio.to_thread(mt5.history_orders_get, start, datetime.now()) or [])
+                deals = list(await asyncio.to_thread(mt5.history_deals_get, start, datetime.now()) or [])
+                known: set[str] = set()
+                for row in positions + orders + hist_orders:
+                    ticket = getattr(row, "ticket", None)
+                    if ticket is not None:
+                        known.add(str(ticket))
+                for deal in deals:
+                    for value in (getattr(deal, "ticket", None), getattr(deal, "order", None)):
+                        if value is not None:
+                            known.add(str(value))
+                recent = execution_ledger.recent_live_tickets(250)
+                reconciliation.unmatched_tickets = [t for t in recent if t not in known][:25]
+                reconciliation.broker_connected = True
+                reconciliation.position_count = sum(1 for p in positions if getattr(p, "magic", None) == MAGIC)
+                reconciliation.pending_count = sum(1 for p in orders if getattr(p, "magic", None) == MAGIC)
+                reconciliation.ok = not reconciliation.unmatched_tickets
+                reconciliation.error = None if reconciliation.ok else "Execution tickets missing from broker state/history"
+                reconciliation.last_sync_ms = int(time.time() * 1000)
+        except Exception as exc:
+            reconciliation.ok = False
+            reconciliation.error = str(exc)
+            reconciliation.last_sync_ms = int(time.time() * 1000)
+        await asyncio.sleep(max(5, int(os.getenv("AURIC_RECONCILE_SECONDS", "15"))))
 
 
 def _validate_candles(candles: list[dict], minimum: int = 220) -> list[dict]:
@@ -819,9 +943,10 @@ async def engine_loop():
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    global feed_task, engine_task, kronos_task, mt5_ready
+    global feed_task, engine_task, kronos_task, mt5_ready, reconciliation_task
     await init_mt5()
     feed_task = asyncio.create_task(market_loop())
+    reconciliation_task = asyncio.create_task(reconciliation_loop())
     # V2 retires the duplicate legacy primary engine loop.  Every tracked
     # symbol, including XAUUSD, now uses SymbolEngine.
     engine_task = None
@@ -841,7 +966,7 @@ async def lifespan(_: FastAPI):
             mt5_mod=mt5,
             mt5_ready_ref=mt5_ref,
             magic=MAGIC,
-            live_enabled=AUTO_LIVE_ENABLED,
+            live_enabled=AUTO_LIVE_ENABLED and execution_policy.auto_live_allowed,
             max_lot=MAX_LOT,
             max_daily_loss=MAX_DAILY_LOSS,
             journal=journal,
@@ -850,6 +975,7 @@ async def lifespan(_: FastAPI):
             kronos_ok=KRONOS_OK,
             mt5_timeframes=MT5_TIMEFRAMES,
             engine_mod=None,
+            trade_guard_fn=blackout_guard.check,
         )
         ENGINES[sym] = eng
         # Start background tasks for every symbol; enable/disable only gates
@@ -864,13 +990,63 @@ async def lifespan(_: FastAPI):
 
     if feed_task:
         feed_task.cancel()
+    if reconciliation_task:
+        reconciliation_task.cancel()
     sync_task.cancel()
     for eng in ENGINES.values():
         eng.stop()
     if mt5_ready and mt5:
         mt5.shutdown()
 
-app = FastAPI(title="AuricTerminal Gateway", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="AuricTerminal Gateway", version="3.0.0", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def production_guard(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or secrets.token_hex(12)
+    request.state.request_id = request_id
+    remote = request.client.host if request.client else "unknown"
+    key = f"{remote}:{request.url.path}"
+    cost = 1.0 if request.method not in ("GET", "HEAD", "OPTIONS") else 0.2
+    if request.url.path.startswith("/api/") and not rate_limiter.allow(key, cost):
+        METRICS["rate_limited"] += 1
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded", "requestId": request_id},
+            headers={"Retry-After": "1", "X-Request-ID": request_id},
+        )
+
+    public = {"/api/health", "/api/readiness", "/api/auth/login"}
+    claims = None
+    if operator_auth.require_auth and request.url.path.startswith("/api/") and request.url.path not in public:
+        token = _bearer_token_from_headers(request.headers)
+        try:
+            claims = operator_auth.verify(token)
+        except PermissionError as exc:
+            METRICS["auth_failures"] += 1
+            audit_log.write(
+                actor="anonymous", action=request.method, resource=request.url.path,
+                outcome="auth_denied", request_id=request_id, remote=remote,
+                details={"reason": str(exc)},
+            )
+            return JSONResponse(
+                status_code=401,
+                content={"detail": str(exc), "requestId": request_id},
+                headers={"X-Request-ID": request_id},
+            )
+    request.state.claims = claims
+    METRICS["requests"] += 1
+    response = await call_next(request)
+    if response.status_code >= 400:
+        METRICS["errors"] += 1
+    response.headers["X-Request-ID"] = request_id
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        audit_log.write(
+            actor=_actor_from_request(request), action=request.method,
+            resource=request.url.path, outcome=str(response.status_code),
+            request_id=request_id, remote=remote,
+        )
+    return response
 
 
 @app.middleware("http")
@@ -900,6 +1076,95 @@ async def terminal():
         return FileResponse(index)
     return FileResponse(ROOT / "index.html")
 
+@app.post("/api/auth/login")
+async def auth_login(req: LoginRequest):
+    try:
+        token = operator_auth.issue(req.username, req.password)
+    except ValueError as exc:
+        raise HTTPException(503, str(exc))
+    except PermissionError:
+        raise HTTPException(401, "Invalid credentials")
+    return {
+        "token": token,
+        "expiresIn": operator_auth.ttl_seconds,
+        "user": req.username,
+        "role": "operator",
+    }
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    claims = getattr(request.state, "claims", None)
+    return {"authenticated": bool(claims), "claims": claims}
+
+
+@app.get("/api/readiness")
+async def readiness():
+    payload = production_readiness(
+        env_name=ENVIRONMENT,
+        policy=execution_policy,
+        auth=operator_auth,
+        live_enabled=LIVE_ENABLED,
+        auto_live_enabled=AUTO_LIVE_ENABLED,
+        live_api_key=LIVE_API_KEY,
+        mt5_connected=bool(mt5_ready),
+        reconciliation=reconciliation,
+    )
+    if not payload["ready"]:
+        return JSONResponse(status_code=503, content=payload)
+    return payload
+
+
+@app.get("/api/production/status")
+async def production_status():
+    return {
+        "environment": ENVIRONMENT,
+        "policy": execution_policy.payload(),
+        "authRequired": operator_auth.require_auth,
+        "authConfigured": operator_auth.configured,
+        "blackout": {sym: blackout_guard.check(sym) for sym in ALL_SYMBOLS},
+        "reconciliation": reconciliation.payload(),
+        "limits": {
+            "maxLot": MAX_LOT,
+            "maxDailyLoss": MAX_DAILY_LOSS,
+            "maxGrossLeverage": float(os.getenv("MAX_GROSS_LEVERAGE", "3.0")),
+            "maxSymbolNotionalPct": float(os.getenv("MAX_SYMBOL_NOTIONAL_PCT", "150")),
+        },
+    }
+
+
+@app.get("/api/audit")
+async def audit_events(limit: int = 100):
+    return {"events": audit_log.recent(limit)}
+
+
+@app.get("/api/metrics")
+async def metrics():
+    lines = [
+        "# TYPE auric_requests_total counter",
+        f"auric_requests_total {METRICS['requests']}",
+        "# TYPE auric_errors_total counter",
+        f"auric_errors_total {METRICS['errors']}",
+        "# TYPE auric_orders_total counter",
+        f"auric_orders_total {METRICS['orders']}",
+        "# TYPE auric_live_orders_total counter",
+        f"auric_live_orders_total {METRICS['live_orders']}",
+        "# TYPE auric_kills_total counter",
+        f"auric_kills_total {METRICS['kills']}",
+        "# TYPE auric_rate_limited_total counter",
+        f"auric_rate_limited_total {METRICS['rate_limited']}",
+        "# TYPE auric_auth_failures_total counter",
+        f"auric_auth_failures_total {METRICS['auth_failures']}",
+        f"auric_reconciliation_ok {1 if reconciliation.ok else 0}",
+    ]
+    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
+
+
+@app.get("/api/reconciliation")
+async def reconciliation_status():
+    return reconciliation.payload()
+
+
 @app.get("/api/health")
 async def health():
     return {
@@ -907,6 +1172,15 @@ async def health():
         "source": latest.get("source"),
         "liveTrading": LIVE_ENABLED,
         "autoLiveTrading": AUTO_LIVE_ENABLED,
+        "environment": ENVIRONMENT,
+        "executionStage": execution_policy.stage,
+        "authRequired": operator_auth.require_auth,
+        "ready": production_readiness(
+            env_name=ENVIRONMENT, policy=execution_policy, auth=operator_auth,
+            live_enabled=LIVE_ENABLED, auto_live_enabled=AUTO_LIVE_ENABLED,
+            live_api_key=LIVE_API_KEY, mt5_connected=bool(mt5_ready),
+            reconciliation=reconciliation,
+        )["ready"],
         "symbol": SYMBOL,
         "timestamp": int(time.time() * 1000),
     }
@@ -1382,6 +1656,13 @@ async def brain_setup(symbol: str = SYMBOL, interval: str = "M15", lookback: int
 
 @app.websocket("/ws/market")
 async def ws_market(ws: WebSocket):
+    if operator_auth.require_auth:
+        token = ws.query_params.get("token", "")
+        try:
+            operator_auth.verify(token)
+        except PermissionError:
+            await ws.close(code=4401)
+            return
     await ws.accept()
     clients.add(ws)
     primary = latest_by_symbol.get(SYMBOL)
@@ -1402,6 +1683,9 @@ async def ws_market(ws: WebSocket):
 
 @app.post("/api/orders")
 async def order(req: OrderRequest, request: Request):
+    METRICS["orders"] += 1
+    if req.mode == "live":
+        METRICS["live_orders"] += 1
     sym = req.symbol.upper()
     if sym not in ALL_SYMBOLS:
         raise HTTPException(422, f"Symbol {sym} not tracked")
@@ -1439,12 +1723,21 @@ async def order(req: OrderRequest, request: Request):
         positions_count = len(open_rows)
         exposure = sum(float(p.volume) for p in open_rows)
     if req.mode == "live":
+        if not execution_policy.live_manual_allowed:
+            raise HTTPException(403, f"Execution stage '{execution_policy.stage}' does not allow manual live orders")
+        blackout = blackout_guard.check(sym)
+        if not blackout["allowed"]:
+            raise HTTPException(403, blackout["reason"])
         await update_realized()
         if risk.realized <= -MAX_DAILY_LOSS:
             risk.kill()
     decision = risk.check(lots, positions_count, exposure, 0.0)
     if not decision["allowed"]:
         raise HTTPException(403, "; ".join(decision["reasons"]))
+    if req.mode == "live":
+        exposure_check = await _portfolio_guard(sym, lots, ask if req.side == "buy" else bid, spec)
+        if not exposure_check["allowed"]:
+            raise HTTPException(403, exposure_check["reason"])
 
     payload = req.model_dump()
     if not execution_ledger.reserve(req.client_order_id, sym, req.mode, req.order_type, payload):
@@ -1564,6 +1857,7 @@ async def kill_all(
     symbol: str = "ALL",
     mode: Literal["paper", "live"] = "paper",
 ):
+    METRICS["kills"] += 1
     sym = symbol.upper()
     if sym != "ALL" and sym not in ALL_SYMBOLS:
         raise HTTPException(422, f"Symbol {sym} not tracked")
