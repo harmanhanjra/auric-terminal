@@ -1429,6 +1429,10 @@ async def order(req: OrderRequest, request: Request):
         open_rows = list(await asyncio.to_thread(mt5.positions_get, symbol=sym) or []) if mt5_ready and mt5 else []
         positions_count = len(open_rows)
         exposure = sum(float(p.volume) for p in open_rows)
+    if req.mode == "live":
+        await update_realized()
+        if risk.realized <= -MAX_DAILY_LOSS:
+            risk.kill()
     decision = risk.check(lots, positions_count, exposure, 0.0)
     if not decision["allowed"]:
         raise HTTPException(403, "; ".join(decision["reasons"]))
