@@ -172,6 +172,10 @@ class ExecutionLedger:
                 self.db.commit()
                 return True
             except sqlite3.IntegrityError:
+                # A failed INSERT starts/poisons the current SQLite transaction.
+                # Roll it back immediately or this connection can retain a write
+                # lock and block audit/reconciliation writers.
+                self.db.rollback()
                 return False
 
     def complete(self, client_order_id: str, result: dict, broker_ticket: Any = None) -> None:
