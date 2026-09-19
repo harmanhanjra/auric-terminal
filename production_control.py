@@ -294,6 +294,19 @@ class ProductionControlPlane:
             raise ValueError("end_ms must be after start_ms")
         cleaned = [s.upper() for s in symbols if s] or ["ALL"]
         with self._db_lock:
+            existing = self.db.execute(
+                "SELECT id FROM news_events WHERE title=? AND start_ms=? AND end_ms=? AND source=? "
+                "ORDER BY id DESC LIMIT 1",
+                (title[:300], int(start_ms), int(end_ms), source[:80]),
+            ).fetchone()
+            if existing:
+                event_id = int(existing["id"])
+                self.db.execute(
+                    "UPDATE news_events SET impact=?, symbols=?, enabled=1 WHERE id=?",
+                    (impact.lower(), json.dumps(cleaned), event_id),
+                )
+                self.db.commit()
+                return event_id
             cur = self.db.execute(
                 "INSERT INTO news_events(title,impact,start_ms,end_ms,symbols,source,enabled,created_at) "
                 "VALUES(?,?,?,?,?,?,1,?)",
