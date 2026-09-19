@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   createChart,
@@ -12,7 +12,7 @@ import {
   type UTCTimestamp,
 } from 'lightweight-charts'
 import { clsx } from 'clsx'
-import { Layers, Bell, Settings2, Grid3X3, Zap, Activity, HeartPulse, TrendingUp } from 'lucide-react'
+import { Activity, Bell, ChevronDown, Grid3X3, HeartPulse, Layers, Settings2, TrendingUp, Zap } from 'lucide-react'
 import { api } from '../lib/api'
 import type { Candle, Quote } from '../lib/types'
 const TIMEFRAMES = ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1', 'W1']
@@ -119,6 +119,7 @@ export function ChartPanel({ quote, activeSymbol = 'XAUUSD', onSelectSymbol }: C
   // Tracked-symbol switcher (mirrors the 3-symbol backend scope).
   const symbols = ['XAUUSD', 'BTCUSD', 'EURUSD']
   const [showStudiesModal, setShowStudiesModal] = useState(false)
+  const [showSymbolMenu, setShowSymbolMenu] = useState(false)
 
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
@@ -288,9 +289,9 @@ export function ChartPanel({ quote, activeSymbol = 'XAUUSD', onSelectSymbol }: C
     updateIndicatorSeries(candles)
 
     chartRef.current?.timeScale().fitContent()
-  }, [candles, chartType])
+  }, [candles, chartType, updateIndicatorSeries])
 
-  const updateIndicatorSeries = (candles: Candle[]) => {
+  const updateIndicatorSeries = useCallback((candles: Candle[]) => {
     if (!chartRef.current) return
 
     // Remove old series that are no longer active
@@ -374,7 +375,7 @@ export function ChartPanel({ quote, activeSymbol = 'XAUUSD', onSelectSymbol }: C
         indicatorSeriesRefs.current.delete('bbands-lower')
       }
     }
-  }
+  }, [indicators])
 
   const calculateEMA = (candles: Candle[], period: number): { time: UTCTimestamp; value: number }[] => {
     if (candles.length === 0) return []
@@ -399,165 +400,148 @@ export function ChartPanel({ quote, activeSymbol = 'XAUUSD', onSelectSymbol }: C
 
   return (
     <div className="flex min-h-0 flex-col">
-      {/* Chart Header with Controls */}
-      <div className="flex h-12 shrink-0 items-center gap-2 border-b border-ink-700/70 bg-ink-900/60 px-3">
-        <div className="flex items-center gap-2">
-          <span className="text-[11px] font-bold text-fg-100">
-            {activeSymbol} <span className="text-[9px] font-medium text-fg-500">· Demo</span>
-          </span>
+      {/* Professional chart command bar */}
+      <div className="auric-chart-toolbar flex h-12 shrink-0 items-center gap-2 border-b border-white/[0.055] px-3">
+        <div className="relative">
+          <button
+            onClick={() => setShowSymbolMenu((open) => !open)}
+            className="flex h-8 items-center gap-2 rounded-lg border border-white/[0.065] bg-white/[0.025] px-2.5 text-left transition hover:bg-white/[0.045]"
+          >
+            <span>
+              <span className="block text-[10px] font-extrabold tracking-[0.04em] text-fg-100">{activeSymbol}</span>
+              <span className="block text-[7px] font-bold uppercase tracking-[0.12em] text-fg-600">
+                {quote?.source || 'market feed'}
+              </span>
+            </span>
+            <ChevronDown className="h-3 w-3 text-fg-600" />
+          </button>
+          {showSymbolMenu ? (
+            <div className="auric-surface auric-surface-elevated absolute left-0 top-10 z-40 w-44 rounded-xl p-1.5">
+              {symbols.map((symbol) => (
+                <button
+                  key={symbol}
+                  onClick={() => {
+                    onSelectSymbol?.(symbol)
+                    setShowSymbolMenu(false)
+                  }}
+                  className={clsx(
+                    'flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-[10px] font-bold',
+                    activeSymbol === symbol
+                      ? 'bg-gold-400/[0.08] text-gold-300'
+                      : 'text-fg-400 hover:bg-white/[0.045] hover:text-fg-100',
+                  )}
+                >
+                  {symbol}
+                  {activeSymbol === symbol ? <span className="h-1.5 w-1.5 rounded-full bg-gold-300" /> : null}
+                </button>
+              ))}
+            </div>
+          ) : null}
         </div>
 
-        <div className="flex-1 flex items-center justify-center gap-3">
-          {/* Timeframe Selector */}
-          <div className="flex items-center gap-1">
-            {TIMEFRAMES.map((t) => (
-              <button
-                key={t}
-                onClick={() => setTf(t)}
-                className={clsx(
-                  'rounded px-2 py-1 text-[10px] font-semibold transition-colors',
-                  tf === t
-                    ? 'bg-gold-600/10 text-gold-300 ring-1 ring-gold-600/30'
-                    : 'text-fg-500 hover:bg-ink-800 hover:text-fg-300',
-                )}
-              >
-                {t}
-              </button>
-            ))}
-          </div>
-
-          {/* Period Selector */}
-          <div className="flex items-center gap-1">
-            <span className="text-[9px] font-medium text-fg-500">Period:</span>
-            {PERIODS.map((p) => (
-              <button
-                key={p.id}
-                onClick={() => setPeriod(p.id)}
-                className={clsx(
-                  'rounded px-2 py-1 text-[9px] font-semibold transition-colors',
-                  period === p.id
-                    ? 'bg-gold-600/10 text-gold-300 ring-1 ring-gold-600/30'
-                    : 'text-fg-500 hover:bg-ink-800 hover:text-fg-300',
-                )}
-              >
-                {p.label}
-              </button>
-            ))}
-          </div>
-
-          {/* Chart Type Selector */}
-          <div className="flex items-center gap-1">
-            <span className="text-[9px] font-medium text-fg-500">Type:</span>
+        <div className="auric-toolbar-group">
+          {TIMEFRAMES.map((timeframe) => (
             <button
-              onClick={() => {
-                const types = ['Candlestick', 'Line', 'Bar', 'HeikinAshi'] as const
-                const currentIndex = types.indexOf(chartType)
-                const nextIndex = (currentIndex + 1) % types.length
-                setChartType(types[nextIndex])
-              }}
-              className={clsx(
-                'rounded px-2 py-1 text-[9px] font-semibold transition-colors',
-                'bg-gold-600/10 text-gold-300 ring-1 ring-gold-600/30'
-              )}
+              key={timeframe}
+              onClick={() => setTf(timeframe)}
+              data-active={tf === timeframe}
+              className="auric-toolbar-button"
             >
-              {chartType === 'Candlestick' ? '🕯️' : chartType === 'Line' ? '📈' : chartType === 'Bar' ? '📊' : '🕒'}
+              {timeframe}
             </button>
-          </div>
+          ))}
+        </div>
 
-          {/* Indicators Button */}
-          <div className="relative">
+        <div className="auric-toolbar-group hidden 2xl:flex">
+          {PERIODS.slice(0, 5).map((item) => (
             <button
-              onClick={() => setShowStudiesModal(!showStudiesModal)}
-              className={clsx(
-                'flex items-center gap-1 rounded px-2 py-1 text-[10px] font-medium transition-colors',
-                showStudiesModal || indicators.length > 0
-                  ? 'bg-gold-600/20 text-gold-300 ring-1 ring-gold-600/30'
-                  : 'text-fg-400 hover:bg-ink-800 hover:text-fg-200'
-              )}
+              key={item.id}
+              onClick={() => setPeriod(item.id)}
+              data-active={period === item.id}
+              className="auric-toolbar-button"
             >
-              <Zap className="h-3.5 w-3.5" /> Studies ({indicators.length})
+              {item.label}
             </button>
-            {symbols.length > 1 && (
-              <div className="absolute left-0 top-full mt-1 w-48 bg-ink-800/90 border border-ink-700 rounded-md p-2 z-20">
-                {symbols.map((symbol, index) => (
-                  <div
-                    key={index}
-                    onClick={() => onSelectSymbol?.(symbol)}
+          ))}
+        </div>
+
+        <div className="relative">
+          <button
+            onClick={() => setShowStudiesModal((open) => !open)}
+            data-active={showStudiesModal || indicators.length > 0}
+            className="auric-toolbar-button border border-transparent"
+          >
+            <Zap className="h-3.5 w-3.5" />
+            Studies
+            <span className="rounded bg-white/[0.05] px-1.5 py-0.5 text-[8px]">{indicators.length}</span>
+          </button>
+          {showStudiesModal ? (
+            <div className="auric-surface auric-surface-elevated absolute left-0 top-9 z-40 w-56 rounded-xl p-2">
+              <div className="mb-1.5 border-b border-white/[0.055] px-1 pb-2 text-[8px] font-bold uppercase tracking-[0.14em] text-fg-600">
+                Technical overlays
+              </div>
+              {INDICATORS.map((indicator) => {
+                const active = indicators.includes(indicator.id)
+                return (
+                  <button
+                    key={indicator.id}
+                    onClick={() =>
+                      setIndicators((current) =>
+                        active
+                          ? current.filter((id) => id !== indicator.id)
+                          : [...current, indicator.id],
+                      )
+                    }
                     className={clsx(
-                      'flex items-center gap-1 p-1 rounded hover:bg-ink-700',
-                      activeSymbol === symbol ? 'bg-gold-600/20' : ''
+                      'flex w-full items-center justify-between rounded-lg px-2 py-2 text-[10px] transition',
+                      active ? 'bg-gold-400/[0.08] text-gold-300' : 'text-fg-400 hover:bg-white/[0.045] hover:text-fg-100',
                     )}
                   >
-                    <span className="text-[10px] font-medium text-fg-100">{symbol}</span>
-                    {activeSymbol === symbol && (
-                      <span className="ml-auto text-[9px] font-bold text-gold-400">●</span>
-                    )}
-                  </div>
-                ))}
-            {showStudiesModal && (
-              <div className="absolute left-0 top-full mt-1.5 w-52 rounded-lg border border-ink-700 bg-ink-900/95 p-2 shadow-2xl backdrop-blur-md z-30 space-y-1">
-                <div className="text-[10px] font-bold uppercase tracking-wider text-fg-400 px-1 pb-1 border-b border-ink-800">
-                  Technical Overlays
-                </div>
-                {INDICATORS.map((ind) => {
-                  const active = indicators.includes(ind.id)
-                  return (
-                    <button
-                      key={ind.id}
-                      onClick={() => {
-                        setIndicators((prev) =>
-                          active ? prev.filter((id) => id !== ind.id) : [...prev, ind.id]
-                        )
-                      }}
-                      className={clsx(
-                        'flex w-full items-center justify-between rounded px-2 py-1 text-[11px] transition-colors',
-                        active ? 'bg-gold-600/15 text-gold-300' : 'text-fg-300 hover:bg-ink-800 hover:text-fg-100'
-                      )}
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="h-2 w-2 rounded-full" style={{ backgroundColor: ind.color }} />
-                        <span>{ind.name}</span>
-                      </div>
-                      <span className="text-[10px] font-bold">{active ? '✓' : '+'}</span>
-                    </button>
-                  )
-                })}
-              </div>
-            )}
-              </div>
-            )}
-          </div>
-
-          {/* Drawing Tools Toggle */}
-          <button
-            onClick={() => setShowDrawingTools(!showDrawingTools)}
-            className={clsx(
-              'flex items-center gap-1 rounded px-2 py-1 text-[10px] font-medium transition-colors',
-              showDrawingTools
-                ? 'bg-gold-600/20 text-gold-300 ring-1 ring-gold-600/30'
-                : 'text-fg-400 hover:bg-ink-800 hover:text-fg-200'
-            )}
-          >
-            <HeartPulse className="h-3.5 w-3.5" /> Drawing
-          </button>
+                    <span className="flex items-center gap-2">
+                      <span className="h-2 w-2 rounded-full" style={{ backgroundColor: indicator.color }} />
+                      {indicator.name}
+                    </span>
+                    <span className="text-[9px] font-black">{active ? 'ON' : '+'}</span>
+                  </button>
+                )
+              })}
+            </div>
+          ) : null}
         </div>
 
-        <div className="flex items-center gap-2">
-          <button className="flex items-center gap-1 rounded px-2 py-1 text-[10px] font-medium text-fg-400 hover:bg-ink-800 hover:text-fg-200">
-            <Layers className="h-3.5 w-3.5" /> Candles
+        <button
+          onClick={() => setShowDrawingTools((open) => !open)}
+          data-active={showDrawingTools}
+          className="auric-toolbar-button"
+        >
+          <HeartPulse className="h-3.5 w-3.5" />
+          Draw
+        </button>
+
+        <button
+          onClick={() => {
+            const types = ['Candlestick', 'Line', 'Bar', 'HeikinAshi'] as const
+            const index = types.indexOf(chartType)
+            setChartType(types[(index + 1) % types.length])
+          }}
+          className="auric-toolbar-button"
+          title="Cycle chart type"
+        >
+          <Layers className="h-3.5 w-3.5" />
+          {chartType === 'HeikinAshi' ? 'Heikin' : chartType}
+        </button>
+
+        <div className="ml-auto flex items-center gap-1">
+          <button className="auric-toolbar-button" title="Price alerts">
+            <Bell className="h-3.5 w-3.5" />
+            <span className="hidden 2xl:inline">Alerts</span>
           </button>
-          <button className="flex items-center gap-1 rounded px-2 py-1 text-[10px] font-medium text-fg-400 hover:bg-ink-800 hover:text-fg-200">
-            <Bell className="h-3.5 w-3.5" /> Alerts
+          <button className="auric-toolbar-button" title="Chart grid">
+            <Grid3X3 className="h-3.5 w-3.5" />
           </button>
-          <div className="mx-1 h-4 w-px bg-ink-700" />
-          <div className="ml-auto flex items-center gap-0.5">
-            <button className="rounded px-2 py-1 text-[10px] font-medium text-fg-400 hover:bg-ink-800 hover:text-fg-200">
-              <Grid3X3 className="h-3.5 w-3.5" />
-            </button>
-            <button className="flex items-center gap-1 rounded px-2 py-1 text-[10px] font-medium text-fg-400 hover:bg-ink-800 hover:text-fg-200">
-              <Settings2 className="h-3.5 w-3.5" /> Scalp
-            </button>
-          </div>
+          <button className="auric-toolbar-button" title="Chart settings">
+            <Settings2 className="h-3.5 w-3.5" />
+          </button>
         </div>
       </div>
 
@@ -612,7 +596,7 @@ export function ChartPanel({ quote, activeSymbol = 'XAUUSD', onSelectSymbol }: C
         </div>
 
         {/* Price Data Display (Top Left) */}
-        <div className="pointer-events-none absolute left-3 top-3 z-20 flex flex-col gap-1 bg-ink-900/70 px-2 py-1.5 rounded-md border border-ink-700/60 backdrop-blur">
+        <div className="pointer-events-none absolute left-3 top-3 z-20 flex flex-col gap-1 auric-data-overlay rounded-lg px-2.5 py-2">
           <div className="flex items-center gap-2">
             <span className="text-[9px] font-bold text-fg-100">O</span>
             <span className="tnum text-[10px] text-fg-300">{last ? last.open.toFixed(2) : '—'}</span>
@@ -639,7 +623,7 @@ export function ChartPanel({ quote, activeSymbol = 'XAUUSD', onSelectSymbol }: C
         </div>
 
         {/* Indicator Values Display (Top Right) */}
-        <div className="pointer-events-none absolute top-3 right-3 z-20 flex flex-col gap-1 bg-ink-900/70 px-2 py-1.5 rounded-md border border-ink-700/60 backdrop-blur">
+        <div className="pointer-events-none absolute top-3 right-3 z-20 flex flex-col gap-1 auric-data-overlay rounded-lg px-2.5 py-2">
           {indicators.map((id) => {
             const indicator = INDICATORS.find(i => i.id === id)
             if (!indicator) return null
