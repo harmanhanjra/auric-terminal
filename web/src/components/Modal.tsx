@@ -1,6 +1,6 @@
-import { clsx } from 'clsx'
 import { X } from 'lucide-react'
 import { useEffect, type ReactNode } from 'react'
+import { Button } from './ui/Button'
 
 interface ModalProps {
   id: string
@@ -14,26 +14,22 @@ export function Modal({ id, title, subtitle, badges, children }: ModalProps) {
   useEffect(() => {
     const el = document.getElementById(`modal-${id}`)
     if (!el) return
-    const close = () => el.classList.remove('open')
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') close()
-    })
-    return () => document.removeEventListener('keydown', (e) => {
-      if (e.key === 'Escape') close()
-    })
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') el.classList.remove('open')
+    }
+
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
   }, [id])
 
   return (
     <div
       id={`modal-${id}`}
-      className="fixed inset-0 z-50 hidden items-center justify-center bg-ink-950/80 p-6 backdrop-blur-md"
+      className="fixed inset-0 z-50 hidden items-center justify-center bg-black/66 p-6 backdrop-blur-xl"
     >
-      <div
-        className={clsx(
-          'flex max-h-[88vh] w-full max-w-[920px] flex-col overflow-hidden rounded-2xl border border-ink-600 bg-ink-900 shadow-[0_30px_80px_rgba(0,0,0,0.6)]',
-        )}
-      >
-        <header className="flex shrink-0 items-start justify-between gap-4 border-b border-ink-700/70 p-5">
+      <div className="auric-surface auric-surface-elevated flex max-h-[88vh] w-full max-w-[920px] flex-col overflow-hidden rounded-2xl">
+        <header className="flex shrink-0 items-start justify-between gap-4 border-b border-white/[0.065] p-5">
           <div>
             <h2 className="text-[17px] font-bold tracking-[-0.03em] text-fg-100">{title}</h2>
             {subtitle && <p className="mt-0.5 text-[11px] text-fg-400">{subtitle}</p>}
@@ -50,13 +46,15 @@ export function Modal({ id, title, subtitle, badges, children }: ModalProps) {
               </div>
             )}
           </div>
-          <button
+          <Button
             onClick={() => document.getElementById(`modal-${id}`)?.classList.remove('open')}
-            className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-ink-700 bg-ink-800 text-fg-300 transition-colors hover:bg-ink-700 hover:text-fg-100"
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8"
             aria-label="Close"
           >
             <X className="h-4 w-4" />
-          </button>
+          </Button>
         </header>
         <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
       </div>
