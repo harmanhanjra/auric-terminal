@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import random
+import sqlite3
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -866,6 +867,99 @@ async def engine_loop():
             ENGINE_STATE["error"] = str(exc)
         await asyncio.sleep(3)
 
+def _backup_database_sync() -> dict:
+    backup_dir = Path(os.getenv("AURIC_BACKUP_DIR", str(DB_PATH.parent / "backups"))).expanduser()
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    dest_path = backup_dir / f"auric-{stamp}.db"
+    source = sqlite3.connect(str(DB_PATH))
+    dest = sqlite3.connect(str(dest_path))
+    try:
+        source.backup(dest)
+    finally:
+        dest.close()
+        source.close()
+
+    retention = max(1, int(os.getenv("BACKUP_RETENTION", "20")))
+    backups = sorted(backup_dir.glob("auric-*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for old in backups[retention:]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
+    return {
+        "ok": True,
+        "file": dest_path.name,
+        "size": dest_path.stat().st_size,
+        "timestamp": int(time.time() * 1000),
+    }
+
+
+async def backup_database() -> dict:
+    return await asyncio.to_thread(_backup_database_sync)
+
+
+async def backup_loop():
+    interval = max(300, int(os.getenv("BACKUP_INTERVAL_SECONDS", "21600")))
+    while True:
+        await asyncio.sleep(interval)
+        if os.getenv("BACKUP_ENABLED", "true").lower() != "true":
+            continue
+        try:
+            result = await backup_database()
+            logger.info("Database backup completed: %s", result["file"])
+        except Exception as exc:
+            logger.warning("Database backup failed: %s", exc)
+
+
+async def sync_news_feed() -> dict:
+    url = os.getenv("NEWS_FEED_URL", "").strip()
+    if not url:
+        return {"configured": False, "ingested": 0}
+    headers = {"Accept": "application/json"}
+    api_key = os.getenv("NEWS_FEED_API_KEY", "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.get(url, headers=headers)
+        response.raise_for_status()
+        payload = response.json()
+    events = payload.get("events", payload) if isinstance(payload, dict) else payload
+    if not isinstance(events, list):
+        raise ValueError("Normalized news feed must return a list or {events:[...]}")
+    ingested = 0
+    source = os.getenv("NEWS_FEED_SOURCE", "normalized-feed")
+    for item in events[:1000]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            control.add_news(
+                title=str(item["title"]),
+                impact=str(item.get("impact", "high")).lower(),
+                start_ms=int(item["start_ms"]),
+                end_ms=int(item["end_ms"]),
+                symbols=[str(x) for x in item.get("symbols", ["ALL"])],
+                source=str(item.get("source", source)),
+            )
+            ingested += 1
+        except (KeyError, TypeError, ValueError):
+            continue
+    return {"configured": True, "ingested": ingested, "source": source}
+
+
+async def news_feed_loop():
+    interval = max(60, int(os.getenv("NEWS_FEED_POLL_SECONDS", "300")))
+    while True:
+        if os.getenv("NEWS_FEED_URL", "").strip():
+            try:
+                result = await sync_news_feed()
+                if result.get("ingested"):
+                    logger.info("News feed sync ingested %s events", result["ingested"])
+            except Exception as exc:
+                logger.warning("News feed sync failed: %s", exc)
+        await asyncio.sleep(interval)
+
+
 async def reconcile_once() -> dict:
     summary: dict = {
         "mt5Connected": bool(mt5_ready and mt5),
@@ -984,6 +1078,8 @@ async def lifespan(_: FastAPI):
         eng.start()
 
     reconcile_task = asyncio.create_task(reconciliation_loop())
+    backup_task = asyncio.create_task(backup_loop())
+    news_task = asyncio.create_task(news_feed_loop())
     logger.info(
         "Auric V3 engines started: %s | manual_live=%s | auto_live=%s | stage=%s",
         list(ENGINES.keys()), LIVE_ENABLED, AUTO_LIVE_ENABLED, control.execution_stage(),
@@ -993,6 +1089,8 @@ async def lifespan(_: FastAPI):
     if feed_task:
         feed_task.cancel()
     reconcile_task.cancel()
+    backup_task.cancel()
+    news_task.cancel()
     sync_task.cancel()
     for eng in ENGINES.values():
         eng.stop()
@@ -1004,6 +1102,7 @@ app = FastAPI(title="AuricTerminal Gateway", version="3.0.0", lifespan=lifespan)
 
 @app.middleware("http")
 async def production_middleware(request: Request, call_next):
+    started = time.perf_counter()
     request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
     token = request.headers.get("x-auric-auth", "")
     if not token:
@@ -1064,6 +1163,11 @@ async def production_middleware(request: Request, call_next):
         "https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; "
         "img-src 'self' data:; connect-src 'self' ws: wss:; "
         "frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    logger.info(
+        "request_id=%s method=%s path=%s status=%s elapsed_ms=%.1f actor=%s",
+        request_id, request.method, request.url.path, status, elapsed_ms, principal.name,
+    )
     return response
 
 
@@ -1137,6 +1241,53 @@ async def whoami(request: Request):
         "authenticated": principal.authenticated,
         "authRequired": control.auth_required,
     }
+
+
+@app.get("/api/metrics")
+async def runtime_metrics(request: Request):
+    _require_role(request, "viewer")
+    now_ms = int(time.time() * 1000)
+    feed_ts = int(latest.get("timestamp", 0) or 0) if isinstance(latest, dict) else 0
+    paper_positions = paper_broker.positions()
+    paper_pending = paper_broker.pending()
+    live_positions = live_pending = 0
+    if mt5_ready and mt5:
+        live_positions = len([
+            p for p in (list(await asyncio.to_thread(mt5.positions_get) or []))
+            if getattr(p, "magic", None) == MAGIC
+        ])
+        live_pending = len([
+            p for p in (list(await asyncio.to_thread(mt5.orders_get) or []))
+            if getattr(p, "magic", None) == MAGIC
+        ])
+    return {
+        "timestamp": now_ms,
+        "feedAgeMs": max(0, now_ms - feed_ts) if feed_ts else None,
+        "websocketClients": len(clients),
+        "paperPositions": len(paper_positions),
+        "paperPending": len(paper_pending),
+        "livePositions": live_positions,
+        "livePending": live_pending,
+        "executionStage": control.execution_stage(),
+        "halted": control.is_halted(),
+        "engineStates": {sym: ENGINES[sym].state.get("status") for sym in ENGINES},
+        "lastReconciliation": control.last_reconciliation(),
+    }
+
+
+@app.post("/api/system/backup")
+async def backup_now(request: Request):
+    _require_role(request, "admin")
+    return await backup_database()
+
+
+@app.post("/api/news/sync")
+async def sync_news_now(request: Request):
+    _require_role(request, "admin")
+    try:
+        return await sync_news_feed()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(502, f"News feed sync failed: {exc}") from exc
 
 
 @app.post("/api/system/stage")
