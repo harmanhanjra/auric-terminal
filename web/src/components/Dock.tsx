@@ -29,6 +29,8 @@ type DockTab = 'positions' | 'journal' | 'risk' | 'signals' | 'logs'
 
 export function Dock({ live, onNavigate }: DockProps) {
   const [activeTab, setActiveTab] = useState<DockTab>('positions')
+  const [actionTicket, setActionTicket] = useState<number | null>(null)
+  const [actionMessage, setActionMessage] = useState<string | null>(null)
 
   // Queries connected to backend endpoints
   const { data: positionsData, refetch: refetchPositions } = useQuery({
@@ -61,6 +63,31 @@ export function Dock({ live, onNavigate }: DockProps) {
   const engineRisk = engineData?.risk
 
   const totalPnl = positions.reduce((acc, p) => acc + (p.pnl || 0), 0)
+
+  const runPositionAction = async (
+    ticket: number,
+    action: 'breakeven' | 'half' | 'close',
+    lots: number,
+  ) => {
+    setActionTicket(ticket)
+    setActionMessage(null)
+    try {
+      if (action === 'breakeven') {
+        await api.protectPosition(ticket, live ? 'live' : 'paper', { breakeven: true })
+      } else {
+        const closeLots = action === 'half' ? Math.max(0.01, lots / 2) : undefined
+        await api.closePosition(ticket, live ? 'live' : 'paper', closeLots)
+      }
+      setActionMessage(
+        action === 'breakeven' ? `#${ticket} moved to breakeven` : `#${ticket} close request accepted`,
+      )
+      await Promise.all([refetchPositions(), refetchJournal()])
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : 'Position action failed')
+    } finally {
+      setActionTicket(null)
+    }
+  }
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-ink-900 text-fg-200">
@@ -178,6 +205,12 @@ export function Dock({ live, onNavigate }: DockProps) {
         </div>
       </div>
 
+      {actionMessage ? (
+        <div className="shrink-0 border-b border-ink-700/60 bg-ink-950/80 px-3 py-1 text-[9px] text-fg-400" aria-live="polite">
+          {actionMessage}
+        </div>
+      ) : null}
+
       {/* Dock Content Body */}
       <div className="min-h-0 flex-1 overflow-auto p-2">
         {/* TAB 1: POSITIONS */}
@@ -202,7 +235,8 @@ export function Dock({ live, onNavigate }: DockProps) {
                     <th className="pb-1.5 font-medium">Current Price</th>
                     <th className="pb-1.5 font-medium">Stop Loss</th>
                     <th className="pb-1.5 font-medium">Take Profit</th>
-                    <th className="pb-1.5 pr-2 text-right font-medium">Net P/L</th>
+                    <th className="pb-1.5 text-right font-medium">Net P/L</th>
+                    <th className="pb-1.5 pr-2 text-right font-medium">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-ink-800/60">
@@ -229,11 +263,39 @@ export function Dock({ live, onNavigate }: DockProps) {
                         <td className="tnum py-2 text-fg-400">{p.tp ? fmtPrice(p.tp) : '—'}</td>
                         <td
                           className={clsx(
-                            'tnum py-2 pr-2 text-right font-bold',
+                            'tnum py-2 text-right font-bold',
                             p.pnl > 0 ? 'text-bull-500' : p.pnl < 0 ? 'text-bear-500' : 'text-fg-300',
                           )}
                         >
                           {p.pnl >= 0 ? `+${fmtMoney(p.pnl)}` : fmtMoney(p.pnl)}
+                        </td>
+                        <td className="py-1.5 pr-2">
+                          <div className="flex justify-end gap-1">
+                            <button
+                              disabled={!p.ticket || actionTicket === p.ticket}
+                              onClick={() => p.ticket && runPositionAction(p.ticket, 'breakeven', p.lots)}
+                              className="rounded border border-ink-700 bg-ink-800 px-1.5 py-1 text-[8px] font-bold text-gold-300 hover:bg-ink-700 disabled:opacity-30"
+                              title="Move stop loss to entry price"
+                            >
+                              BE
+                            </button>
+                            <button
+                              disabled={!p.ticket || actionTicket === p.ticket || p.lots <= 0.01}
+                              onClick={() => p.ticket && runPositionAction(p.ticket, 'half', p.lots)}
+                              className="rounded border border-ink-700 bg-ink-800 px-1.5 py-1 text-[8px] font-bold text-fg-300 hover:bg-ink-700 disabled:opacity-30"
+                              title="Close half of the position"
+                            >
+                              ½
+                            </button>
+                            <button
+                              disabled={!p.ticket || actionTicket === p.ticket}
+                              onClick={() => p.ticket && runPositionAction(p.ticket, 'close', p.lots)}
+                              className="rounded border border-bear-500/25 bg-bear-500/8 px-1.5 py-1 text-[8px] font-bold text-bear-400 hover:bg-bear-500/15 disabled:opacity-30"
+                              title="Close the full position"
+                            >
+                              Close
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     )
