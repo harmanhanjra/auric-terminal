@@ -43,7 +43,10 @@ export function OrderTicket({ quote, live, activeSymbol = 'XAUUSD' }: OrderTicke
     setSl(roundFor(activeSymbol, quote.price * 0.996))
     setTp(roundFor(activeSymbol, quote.price * 1.008))
     setStatus(null)
-  }, [activeSymbol, quote.price])
+    // Re-anchor only when the instrument changes; live ticks must not overwrite
+    // a trader's edited entry/SL/TP.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSymbol])
 
   const effectiveEntry = orderType === 'market' ? quote.price : entryPrice
   const previewEnabled =
