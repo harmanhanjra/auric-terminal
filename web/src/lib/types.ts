@@ -14,6 +14,10 @@ export interface Health {
   source: string
   liveTrading: boolean
   autoLiveTrading?: boolean
+  environment?: string
+  executionStage?: 'shadow' | 'paper' | 'assisted' | 'auto'
+  authRequired?: boolean
+  ready?: boolean
   symbol: string
   timestamp: number
 }
@@ -246,4 +250,49 @@ export interface KronosForecast {
     pct_change: number
     rows: number
   }
+}
+
+
+export interface LoginResult {
+  token: string
+  expiresIn: number
+  user: string
+  role: string
+}
+
+export interface ProductionStatus {
+  environment: string
+  policy: {
+    stage: 'shadow' | 'paper' | 'assisted' | 'auto'
+    shadow: boolean
+    paperAllowed: boolean
+    manualLiveAllowed: boolean
+    autoLiveAllowed: boolean
+  }
+  authRequired: boolean
+  authConfigured: boolean
+  blackout: Record<string, { allowed: boolean; reason: string; event?: unknown }>
+  reconciliation: {
+    ok: boolean
+    brokerConnected: boolean
+    lastSyncMs: number
+    ageMs?: number | null
+    positionCount: number
+    pendingCount: number
+    unmatchedTickets: string[]
+    error?: string | null
+  }
+  limits: {
+    maxLot: number
+    maxDailyLoss: number
+    maxGrossLeverage: number
+    maxSymbolNotionalPct: number
+  }
+}
+
+export interface ReadinessStatus {
+  ready: boolean
+  environment: string
+  policy: ProductionStatus['policy']
+  checks: Array<{ name: string; ok: boolean; detail: string }>
 }
