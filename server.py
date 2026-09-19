@@ -52,6 +52,16 @@ LIVE_API_KEY = os.getenv("AURIC_LIVE_API_KEY", "")
 MAX_LOT = float(os.getenv("MAX_LOT", "1.0"))
 MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", "500.0"))
 MAX_SPREAD_POINTS = float(os.getenv("MAX_SPREAD_POINTS", "80"))
+DEFAULT_SPREAD_LIMITS = {"XAUUSD": 80.0, "BTCUSD": 1500.0, "EURUSD": 30.0}
+
+def max_spread_points_for(symbol: str) -> float:
+    specific = os.getenv(f"MAX_SPREAD_POINTS_{symbol.upper()}")
+    if specific:
+        return float(specific)
+    generic = os.getenv("MAX_SPREAD_POINTS")
+    if generic:
+        return float(generic)
+    return DEFAULT_SPREAD_LIMITS.get(symbol.upper(), MAX_SPREAD_POINTS)
 
 if LIVE_ENABLED:
     logger.warning(
@@ -87,10 +97,12 @@ latest = {"symbol": SYMBOL, "bid": 0.0, "ask": 0.0, "price": 0.0, "spread": 0.0,
 latest_by_symbol: dict[str, dict] = {}
 feed_task: asyncio.Task | None = None
 mt5_ready = False
+# Portfolio risk is symbol-agnostic; spread is checked separately against each
+# instrument's point-based threshold.
 risk = RiskManager(
     daily_loss=MAX_DAILY_LOSS,
     max_lot=MAX_LOT,
-    spread_guard=MAX_SPREAD_POINTS,
+    spread_guard=1e12,
 )
 
 def _require_live_auth(request: Request) -> None:
@@ -302,8 +314,11 @@ async def broadcast(data: dict):
 
 async def market_loop():
     global latest
-    # demo per symbol
-    demos = {sym: 5000.0 for sym in ALL_SYMBOLS}
+    # Honest deterministic-ish fallback scales per asset instead of pretending
+    # every symbol trades like gold.
+    demos = {"XAUUSD": 5000.0, "BTCUSD": 97000.0, "EURUSD": 1.0850}
+    demo_half_spread = {"XAUUSD": 0.09, "BTCUSD": 4.0, "EURUSD": 0.00005}
+    demo_move = {"XAUUSD": 0.45, "BTCUSD": 18.0, "EURUSD": 0.00008}
     async with httpx.AsyncClient() as client:
         await init_mt5()
         while True:
@@ -328,11 +343,14 @@ async def market_loop():
                         except Exception:
                             pass
                 if tick is None:
-                    demo_price = demos[sym]
-                    demo_price = max(1, demo_price + random.uniform(-0.45, 0.45))
+                    demo_price = demos.get(sym, 100.0)
+                    delta = demo_move.get(sym, max(demo_price * 0.0001, 0.00001))
+                    floor = 0.00001 if demo_price < 10 else 1.0
+                    demo_price = max(floor, demo_price + random.uniform(-delta, delta))
                     demos[sym] = demo_price
-                    tick = {"symbol": sym, "bid": demo_price - 0.09, "ask": demo_price + 0.09,
-                            "price": demo_price, "spread": 0.18, "source": "Demo",
+                    half = demo_half_spread.get(sym, max(demo_price * 0.00002, 0.00001))
+                    tick = {"symbol": sym, "bid": demo_price - half, "ask": demo_price + half,
+                            "price": demo_price, "spread": half * 2, "source": "Demo",
                             "timestamp": int(time.time() * 1000)}
                 overall_latest[sym] = tick
                 await broadcast(tick)
@@ -877,8 +895,14 @@ async def terminal():
 
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "source": latest.get("source"), "liveTrading": LIVE_ENABLED,
-            "symbol": SYMBOL, "timestamp": int(time.time() * 1000)}
+    return {
+        "ok": True,
+        "source": latest.get("source"),
+        "liveTrading": LIVE_ENABLED,
+        "autoLiveTrading": AUTO_LIVE_ENABLED,
+        "symbol": SYMBOL,
+        "timestamp": int(time.time() * 1000),
+    }
 
 @app.get("/api/quote")
 async def quote():
@@ -1392,6 +1416,12 @@ async def order(req: OrderRequest, request: Request):
     spec = spec_from_info(sym, info) if info else fallback_spec(sym)
     lots = normalize_volume(req.lots, spec, MAX_LOT)
     sp_points = spread_points(bid, ask, spec)
+    spread_limit = max_spread_points_for(sym)
+    if sp_points > spread_limit:
+        raise HTTPException(
+            403,
+            f"Spread guard active ({sp_points:.1f} pts > {spread_limit:.1f} pts for {sym})",
+        )
     if req.mode == "paper":
         positions_count = len(paper_broker.positions(sym))
         exposure = sum(float(p["lots"]) for p in paper_broker.positions(sym))
@@ -1399,7 +1429,7 @@ async def order(req: OrderRequest, request: Request):
         open_rows = list(await asyncio.to_thread(mt5.positions_get, symbol=sym) or []) if mt5_ready and mt5 else []
         positions_count = len(open_rows)
         exposure = sum(float(p.volume) for p in open_rows)
-    decision = risk.check(lots, positions_count, exposure, sp_points)
+    decision = risk.check(lots, positions_count, exposure, 0.0)
     if not decision["allowed"]:
         raise HTTPException(403, "; ".join(decision["reasons"]))
 
