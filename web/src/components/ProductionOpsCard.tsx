@@ -8,7 +8,7 @@ import {
   ShieldOff,
   Siren,
 } from 'lucide-react'
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { api, ApiError, getAuthKey, setAuthKey } from '../lib/api'
 import type { ExecutionStage } from '../lib/types'
 
@@ -243,7 +243,7 @@ function StatusTile({
   label: string
   value: string
   tone: 'bull' | 'bear' | 'neutral'
-  icon: React.ReactNode
+  icon: ReactNode
 }) {
   return (
     <div className="rounded-md border border-ink-700/70 bg-ink-800/40 p-2">
