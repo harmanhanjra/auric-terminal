@@ -223,11 +223,11 @@ def test_account_unavailable(client):
 
 
 def test_candles_always_available(client):
-    # MT5 offline + no Yahoo creds -> deterministic Demo series (honestly labelled)
+    # MT5 is offline in CI. Yahoo may be reachable; otherwise the honest Demo fallback is used.
     r = client.get("/api/candles?interval=M15")
     assert r.status_code == 200
     body = r.json()
-    assert body["source"] == "Demo"
+    assert body["source"] in {"Yahoo", "Demo"}
     assert len(body["values"]) >= 10
     assert all({"open", "high", "low", "close"} <= set(v) for v in body["values"])
 
