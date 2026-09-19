@@ -203,7 +203,8 @@ class SymbolEngine:
         candles = [{"open": float(r["open"]), "high": float(r["high"]),
                     "low": float(r["low"]), "close": float(r["close"])} for r in rates]
         av = _atr(candles, 14)
-        trail = max(av[-1] * self.config["trail_atr"], 0.1)
+        from engine import round_price as _round_price, stop_distance as _stop_dist
+        trail = _stop_dist(self.symbol, av[-1], self.config["trail_atr"])
         tick = await asyncio.to_thread(self.mt5.symbol_info_tick, self.symbol)
         if not tick:
             return
@@ -222,12 +223,12 @@ class SymbolEngine:
                     moved = new_sl
             if moved is not None:
                 request = {"action": self.mt5.TRADE_ACTION_SLTP, "symbol": self.symbol,
-                           "position": p.ticket, "sl": round(moved, 2),
+                           "position": p.ticket, "sl": _round_price(self.symbol, moved),
                            "tp": float(p.tp or 0.0), "type_time": self.mt5.ORDER_TIME_GTC}
                 result = await asyncio.to_thread(self.mt5.order_send, request)
                 if result and result.retcode == self.mt5.TRADE_RETCODE_DONE:
                     self._log({"type": "trail", "side": 1 if is_long else -1,
-                               "sl": round(moved, 2), "ticket": p.ticket})
+                               "sl": _round_price(self.symbol, moved), "ticket": p.ticket})
 
     # ── Pyramiding ────────────────────────────────────────────────────────
     async def _try_pyramid(self, candles, ind, ours, open_rows, bar):
@@ -411,14 +412,14 @@ class SymbolEngine:
             return
 
         av = ind["av"]
-        dist = max(av[-1] * self.config["atr_stop"], 0.1)
+        from engine import sl_tp as _sl_tp, stop_distance as _stop_dist
+        dist = _stop_dist(self.symbol, av[-1], self.config["atr_stop"])
         equity = 10000.0
         size = position_size(self.config["sizer"], equity,
                              self.config["risk_pct"], dist, price, state={})
         size = round(min(max(size, 0.01), self.max_lot), 2)
 
-        stop = price - dist * side
-        target = price + dist * self.config["rr"] * side
+        stop, target = _sl_tp(self.symbol, price, side, dist, self.config["rr"])
 
         self.state["trades"] += 1
         self.state["status"] = "in_position"
@@ -513,7 +514,8 @@ class SymbolEngine:
             self.state["error"] = "Account info unavailable"
             return
         av = ind["av"]
-        dist = max(av[-1] * self.config["atr_stop"], 0.1)
+        from engine import sl_tp as _sl_tp, stop_distance as _stop_dist
+        dist = _stop_dist(self.symbol, av[-1], self.config["atr_stop"])
         size = position_size(self.config["sizer"], float(account.equity),
                              self.config["risk_pct"], dist, float(candles[-1]["close"]), state={})
         size = round(min(max(size, 0.01), self.max_lot), 2)
@@ -529,12 +531,12 @@ class SymbolEngine:
             self.state["error"] = "No tick"
             return
         price = tick.ask if side == 1 else tick.bid
-        stop = price - dist * side
-        target = price + dist * self.config["rr"] * side
+        from engine import sl_tp as _sl_tp2, round_price as _round_price2
+        stop, target = _sl_tp2(self.symbol, price, side, dist, self.config["rr"])
         order_type = self.mt5.ORDER_TYPE_BUY if side == 1 else self.mt5.ORDER_TYPE_SELL
         request = {"action": self.mt5.TRADE_ACTION_DEAL, "symbol": self.symbol, "volume": size,
-                   "type": order_type, "price": price, "sl": round(stop, 2),
-                   "tp": round(target, 2), "deviation": 20, "magic": self.magic,
+                   "type": order_type, "price": price, "sl": stop,
+                   "tp": target, "deviation": 20, "magic": self.magic,
                    "comment": "AuricEngine", "type_time": self.mt5.ORDER_TIME_GTC,
                    "type_filling": self.mt5.ORDER_FILLING_IOC}
         result = await asyncio.to_thread(self.mt5.order_send, request)
@@ -558,7 +560,7 @@ class SymbolEngine:
         await self.tg_notify(
             f"<b>Auric ENTRY</b> {dir_str} {self.symbol}\n"
             f"Lots: {size} | Price: {result.price}\n"
-            f"SL: {round(stop, 2)} | TP: {round(target, 2)}\n"
+            f"SL: {stop} | TP: {target}\n"
             f"Strategy: {self.config['strategy']}{kronos_str}\n"
             f"Ticket: {result.order}")
 

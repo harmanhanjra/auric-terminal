@@ -44,6 +44,50 @@ SIZERS = ["fixed_lot", "fixed_fractional", "atr_risk", "martingale",
 #: XAU/USD contract size in ounces per lot (used for P/L conversion).
 OUNCES_PER_LOT = 100
 
+#: Per-symbol price specs. ``pip`` is the display/trading pip for the symbol
+#: (not the MT5 point): XAUUSD 1 pip = 0.10, BTCUSD 1 pip = 1.0,
+#: EURUSD 1 pip = 0.0001. ``min_dist`` is the floor for ATR-derived stop
+#: distances in price units so a flat 0.1 is never applied to forex/crypto.
+SYMBOL_SPECS = {
+    "XAUUSD": {"digits": 2, "point": 0.01, "pip": 0.10, "min_dist": 0.50},
+    "BTCUSD": {"digits": 2, "point": 0.01, "pip": 1.0, "min_dist": 50.0},
+    "EURUSD": {"digits": 5, "point": 1e-5, "pip": 0.0001, "min_dist": 0.0005},
+}
+_DEFAULT_SPEC = {"digits": 2, "point": 0.01, "pip": 0.10, "min_dist": 0.10}
+
+
+def symbol_spec(symbol: str) -> dict:
+    """Return the price spec for ``symbol`` (case-insensitive)."""
+    return SYMBOL_SPECS.get(str(symbol or "").upper(), _DEFAULT_SPEC)
+
+
+def round_price(symbol: str, price: float) -> float:
+    """Round ``price`` to the broker digits for ``symbol``."""
+    return round(float(price), symbol_spec(symbol)["digits"])
+
+
+def stop_distance(symbol: str, atr_value: float, atr_mult: float) -> float:
+    """ATR-derived stop distance floored per symbol (price units)."""
+    try:
+        raw = float(atr_value) * float(atr_mult)
+    except (TypeError, ValueError):
+        raw = 0.0
+    return max(raw, symbol_spec(symbol)["min_dist"])
+
+
+def sl_tp(symbol: str, price: float, side: int, dist: float, rr: float) -> tuple[float, float]:
+    """Return broker-rounded (stop, target) for ``side`` (+1 long, -1 short)."""
+    s = 1 if side >= 0 else -1
+    stop = round_price(symbol, float(price) - float(dist) * s)
+    target = round_price(symbol, float(price) + float(dist) * float(rr) * s)
+    return stop, target
+
+
+def to_pips(symbol: str, price_distance: float) -> float:
+    """Convert a price distance to pips for ``symbol`` (display only)."""
+    pip = symbol_spec(symbol)["pip"]
+    return float(price_distance) / pip if pip else 0.0
+
 
 def sma(v, n):
     """Simple moving average with running sum (O(n))."""
