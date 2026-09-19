@@ -57,7 +57,7 @@ class SymbolEngine:
                  magic: int, live_enabled: bool, max_lot: float,
                  max_daily_loss: float, journal, tg_notify_fn,
                  kronos_engine_mod, kronos_ok: bool, mt5_timeframes: dict,
-                 engine_mod):
+                 engine_mod, trade_guard_fn=None):
         self.symbol = symbol
         self.mt5 = mt5_mod
         self._mt5_ready = mt5_ready_ref  # shared mutable ref
@@ -71,6 +71,7 @@ class SymbolEngine:
         self.kronos_ok = kronos_ok
         self.mt5_timeframes = mt5_timeframes
         self.engine_mod = engine_mod
+        self.trade_guard = trade_guard_fn
 
         # Per-symbol engine config (all symbols share same defaults)
         self.config: Dict[str, Any] = {
@@ -214,6 +215,43 @@ class SymbolEngine:
                            f"{self.kronos_cache['pct_change']:+.2f}%"),
                 "kronos_dir": k_dir, "confidence": conf}
 
+    async def _portfolio_guard(self, proposed_lots: float, price: float, spec) -> dict:
+        """Cross-asset concentration guard measured in notional/equity."""
+        account = await asyncio.to_thread(self.mt5.account_info)
+        if account is None or float(account.equity) <= 0:
+            return {"allowed": False, "reason": "Account equity unavailable"}
+        equity = float(account.equity)
+        max_gross = float(os.getenv("MAX_GROSS_LEVERAGE", "3.0"))
+        max_symbol_pct = float(os.getenv("MAX_SYMBOL_NOTIONAL_PCT", "150"))
+        rows = list(await asyncio.to_thread(self.mt5.positions_get) or [])
+        gross = 0.0
+        symbol_notional = 0.0
+        for p in rows:
+            if getattr(p, "magic", None) != self.magic:
+                continue
+            pinfo = await asyncio.to_thread(self.mt5.symbol_info, p.symbol)
+            pspec = spec_from_info(p.symbol, pinfo) if pinfo else fallback_spec(p.symbol)
+            market = float(getattr(p, "price_current", 0.0) or getattr(p, "price_open", 0.0) or 0.0)
+            notional = abs(float(p.volume) * pspec.contract_size * market)
+            gross += notional
+            if p.symbol == self.symbol:
+                symbol_notional += notional
+        proposed = abs(float(proposed_lots) * spec.contract_size * float(price))
+        if gross + proposed > equity * max_gross:
+            return {"allowed": False, "reason": f"Gross exposure cap ({max_gross:.2f}x equity)"}
+        if symbol_notional + proposed > equity * (max_symbol_pct / 100.0):
+            return {"allowed": False, "reason": f"{self.symbol} concentration cap ({max_symbol_pct:.0f}% equity)"}
+        return {"allowed": True, "reason": "Portfolio exposure within limits"}
+
+    def _external_trade_guard(self) -> dict:
+        if not self.trade_guard:
+            return {"allowed": True, "reason": "No external guard configured"}
+        try:
+            result = self.trade_guard(self.symbol)
+            return result if isinstance(result, dict) else {"allowed": bool(result), "reason": "external guard"}
+        except Exception as exc:
+            return {"allowed": False, "reason": f"External trade guard error: {exc}"}
+
     async def _sync_realized(self):
         """Refresh today's realized P/L for this strategy/symbol from broker history."""
         if not self._mt5_ready["ok"] or not self.mt5:
@@ -302,6 +340,12 @@ class SymbolEngine:
             return
 
         pyramid_side = 1 if is_long else -1
+        external_guard = self._external_trade_guard()
+        if not external_guard["allowed"]:
+            self.state["status"] = "blackout"
+            self.state["error"] = external_guard["reason"]
+            self._log({"type": "blocked", "reason": external_guard["reason"], "bar": bar})
+            return
         kronos_check = self._kronos_agrees(pyramid_side)
         if not kronos_check["ok"]:
             self._log({"type": "kronos_veto", "side": pyramid_side,
@@ -327,6 +371,12 @@ class SymbolEngine:
             return
 
         price = normalize_price(tick.ask if is_long else tick.bid, spec)
+        portfolio = await self._portfolio_guard(add, price, spec)
+        if not portfolio["allowed"]:
+            self.state["status"] = "risk_blocked"
+            self.state["error"] = portfolio["reason"]
+            self._log({"type": "blocked", "reason": portfolio["reason"], "bar": bar})
+            return
         order_type = self.mt5.ORDER_TYPE_BUY if is_long else self.mt5.ORDER_TYPE_SELL
         request = {
             "action": self.mt5.TRADE_ACTION_DEAL,
@@ -338,7 +388,7 @@ class SymbolEngine:
             "tp": normalize_price(float(pos.tp), spec) if pos.tp else 0.0,
             "deviation": 20,
             "magic": self.magic,
-            "comment": "AuricEngine+",
+            "comment": "AuricV3-Pyramid",
             "type_time": self.mt5.ORDER_TIME_GTC,
             "type_filling": choose_filling(self.mt5, spec),
         }
@@ -605,6 +655,14 @@ class SymbolEngine:
             return
         self._log({"type": "signal", "side": side, "reason": reason, "bar": bar})
 
+        external_guard = self._external_trade_guard()
+        self.state["signal"]["externalGuard"] = external_guard
+        if not external_guard["allowed"]:
+            self.state["status"] = "blackout"
+            self.state["error"] = external_guard["reason"]
+            self._log({"type": "blocked", "side": side, "reason": external_guard["reason"], "bar": bar})
+            return
+
         kronos_check = self._kronos_agrees(side)
         self.state["signal"]["kronos"] = kronos_check
         if not kronos_check["ok"]:
@@ -637,6 +695,12 @@ class SymbolEngine:
             self._log({"type": "blocked", "reasons": decision["reasons"],
                        "spreadPoints": sp_points, "bar": bar})
             return
+        portfolio = await self._portfolio_guard(size, price, spec)
+        if not portfolio["allowed"]:
+            self.state["error"] = portfolio["reason"]
+            self.state["status"] = "risk_blocked"
+            self._log({"type": "blocked", "reason": portfolio["reason"], "bar": bar})
+            return
 
         order_type = self.mt5.ORDER_TYPE_BUY if side == 1 else self.mt5.ORDER_TYPE_SELL
         request = {
@@ -649,7 +713,7 @@ class SymbolEngine:
             "tp": target,
             "deviation": 20,
             "magic": self.magic,
-            "comment": "AuricV2-Auto",
+            "comment": "AuricV3-Auto",
             "type_time": self.mt5.ORDER_TIME_GTC,
             "type_filling": choose_filling(self.mt5, spec),
         }
