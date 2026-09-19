@@ -33,6 +33,7 @@ from execution_v2 import (
     fallback_spec,
     normalize_price,
     normalize_volume,
+    minimum_stop_distance,
     position_size_for_risk,
     risk_per_lot,
     spec_from_info,
@@ -2072,6 +2073,31 @@ async def order(req: OrderRequest, request: Request):
     info = await asyncio.to_thread(mt5.symbol_info, sym) if mt5_ready and mt5 else None
     spec = spec_from_info(sym, info) if info else fallback_spec(sym)
     lots = normalize_volume(req.lots, spec, MAX_LOT)
+    min_distance = minimum_stop_distance(spec)
+    reference_entry = float(req.entry_price) if req.entry_price is not None else (ask if req.side == "buy" else bid)
+
+    if req.side == "buy":
+        if req.stop_loss is not None and req.stop_loss >= reference_entry - min_distance:
+            raise HTTPException(422, "BUY stop loss must be below entry by at least the minimum stop distance")
+        if req.take_profit is not None and req.take_profit <= reference_entry + min_distance:
+            raise HTTPException(422, "BUY take profit must be above entry by at least the minimum stop distance")
+    else:
+        if req.stop_loss is not None and req.stop_loss <= reference_entry + min_distance:
+            raise HTTPException(422, "SELL stop loss must be above entry by at least the minimum stop distance")
+        if req.take_profit is not None and req.take_profit >= reference_entry - min_distance:
+            raise HTTPException(422, "SELL take profit must be below entry by at least the minimum stop distance")
+
+    if req.order_type == "limit" and req.entry_price is not None:
+        if req.side == "buy" and req.entry_price >= ask - min_distance:
+            raise HTTPException(422, "BUY limit entry must be below the current ask")
+        if req.side == "sell" and req.entry_price <= bid + min_distance:
+            raise HTTPException(422, "SELL limit entry must be above the current bid")
+    if req.order_type == "stop" and req.entry_price is not None:
+        if req.side == "buy" and req.entry_price <= ask + min_distance:
+            raise HTTPException(422, "BUY stop entry must be above the current ask")
+        if req.side == "sell" and req.entry_price >= bid - min_distance:
+            raise HTTPException(422, "SELL stop entry must be below the current bid")
+
     sp_points = spread_points(bid, ask, spec)
     spread_limit = max_spread_points_for(sym)
     if sp_points > spread_limit:
