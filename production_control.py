@@ -9,6 +9,7 @@ changing trading logic.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -115,7 +116,8 @@ class ProductionControlPlane:
             else:
                 continue
             if role in ROLE_LEVEL:
-                out[token] = Principal(name=name, role=role, authenticated=True)
+                digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+                out[digest] = Principal(name=name, role=role, authenticated=True)
         return out
 
     def _set_default(self, key: str, value: str) -> None:
@@ -141,8 +143,10 @@ class ProductionControlPlane:
             self.db.commit()
 
     def authenticate(self, token: str | None) -> Principal:
-        if token and token in self._keys:
-            return self._keys[token]
+        if token:
+            digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+            if digest in self._keys:
+                return self._keys[digest]
         if not self.auth_required:
             return Principal(name="local", role="admin", authenticated=False)
         return Principal(name="anonymous", role="viewer", authenticated=False)
