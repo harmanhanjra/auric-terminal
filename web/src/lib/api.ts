@@ -15,6 +15,7 @@ import type {
   KronosStatus,
   KronosForecast,
   KronosDataset,
+  RiskPreview,
 } from './types'
 
 export class ApiError extends Error {
@@ -81,9 +82,15 @@ export const api = {
   symbols: () => request<{ symbols: SymbolSummary[] }>('/api/symbols'),
   symbolQuote: (symbol: string) =>
     request<Quote>(`/api/symbols/${encodeURIComponent(symbol)}/quote`).catch(() => null as unknown as Quote),
-  positions: () => request<PositionsResponse>('/api/positions'),
+  positions: (mode: 'paper' | 'live' | 'all' = 'all', symbol?: string) => {
+    const params = new URLSearchParams({ mode })
+    if (symbol) params.set('symbol', symbol)
+    return request<PositionsResponse>(`/api/positions?${params.toString()}`)
+  },
   journal: (limit = 100) => request<JournalResponse>(`/api/journal?limit=${limit}`),
   engine: () => request<EngineStatus>('/api/engine'),
+  symbolEngine: (symbol: string) =>
+    request<EngineStatus>(`/api/symbols/${encodeURIComponent(symbol)}`),
   candles: (interval: string, outputsize = 300, symbol?: string) =>
     request<CandleResponse>(
       `/api/candles?interval=${interval}&outputsize=${outputsize}&symbol=${symbol ?? 'XAUUSD'}`,
@@ -99,6 +106,15 @@ export const api = {
   }) => request<BacktestResult>('/api/backtest', { method: 'POST', body: JSON.stringify(payload) }),
   order: (payload: OrderRequest & { symbol?: string }) =>
     request<OrderResult>('/api/orders', { method: 'POST', body: JSON.stringify(payload) }),
+  riskPreview: (payload: {
+    symbol: string
+    side: 'buy' | 'sell'
+    entry: number
+    stop: number
+    target?: number | null
+    risk_pct?: number
+    risk_amount?: number | null
+  }) => request<RiskPreview>('/api/risk/preview', { method: 'POST', body: JSON.stringify(payload) }),
   engineStart: () => request<EngineStatus>('/api/engine/start', { method: 'POST' }),
   engineStop: () => request<EngineStatus>('/api/engine/stop', { method: 'POST' }),
   symbolStart: (symbol: string) =>
