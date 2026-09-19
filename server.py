@@ -43,6 +43,8 @@ from production_control import Principal, ProductionControlPlane
 logger = logging.getLogger("auric")
 
 ROOT = Path(__file__).parent
+DB_PATH = Path(os.getenv("AURIC_DB_PATH", str(ROOT / "auric.db"))).expanduser()
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 SYMBOL = os.getenv("MT5_SYMBOL", "XAUUSD")
 TD_SYMBOL = os.getenv("TWELVE_DATA_SYMBOL", "XAU/USD")
 TD_KEY = os.getenv("TWELVE_DATA_API_KEY", "")
@@ -133,10 +135,10 @@ def _require_role(request: Request, minimum_role: str) -> Principal:
         raise HTTPException(403, f"{minimum_role} role required")
     return principal
 
-journal = Journal(str(ROOT / "auric.db"))
-execution_ledger = ExecutionLedger(str(ROOT / "auric.db"))
+journal = Journal(str(DB_PATH))
+execution_ledger = ExecutionLedger(str(DB_PATH))
 paper_broker = PaperBroker()
-control = ProductionControlPlane(str(ROOT / "auric.db"))
+control = ProductionControlPlane(str(DB_PATH))
 
 MAGIC = 144021
 ENGINE_CONFIG = {
