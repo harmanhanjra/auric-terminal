@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import type { PointerEvent as ReactPointerEvent } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { BrainCircuit, LayoutPanelTop, PanelBottomClose, PanelRightClose, Search } from 'lucide-react'
 import { TopBar } from './components/TopBar'
@@ -114,7 +115,7 @@ export default function App() {
 
   const applyLayout = (preset: LayoutPreset) => setLayout(LAYOUTS[preset])
 
-  const beginSideResize = (event: React.PointerEvent<HTMLDivElement>) => {
+  const beginSideResize = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.preventDefault()
     const startX = event.clientX
     const startWidth = layout.sideWidth
@@ -132,7 +133,7 @@ export default function App() {
     window.addEventListener('pointerup', up)
   }
 
-  const beginDockResize = (event: React.PointerEvent<HTMLDivElement>) => {
+  const beginDockResize = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.preventDefault()
     const startY = event.clientY
     const startHeight = layout.dockHeight
