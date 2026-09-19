@@ -35,7 +35,7 @@ export const SESSION_STORAGE = 'auric.session.v1'
 
 export function getLiveKey(): string {
   try {
-    return localStorage.getItem(LIVE_KEY_STORAGE) || ''
+    return sessionStorage.getItem(LIVE_KEY_STORAGE) || ''
   } catch {
     return ''
   }
@@ -43,8 +43,8 @@ export function getLiveKey(): string {
 
 export function setLiveKey(key: string): void {
   try {
-    if (key) localStorage.setItem(LIVE_KEY_STORAGE, key)
-    else localStorage.removeItem(LIVE_KEY_STORAGE)
+    if (key) sessionStorage.setItem(LIVE_KEY_STORAGE, key)
+    else sessionStorage.removeItem(LIVE_KEY_STORAGE)
   } catch {
     /* ignore */
   }
