@@ -1,6 +1,6 @@
 import { clsx } from 'clsx'
 import { useQuery } from '@tanstack/react-query'
-import { Bot, Power, Radio, ShieldCheck } from 'lucide-react'
+import { Bot, Command, Power, Radio, ShieldCheck } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import { fmtMoney, fmtPrice } from '../lib/format'
@@ -14,6 +14,7 @@ interface TopBarProps {
   feedStatus: string
   activeSymbol: string
   onSelectSymbol: (symbol: string) => void
+  onOpenCommand: () => void
 }
 
 const SESSIONS = [
@@ -33,7 +34,15 @@ function getCurrentSession(): string {
   return 'CLOSED'
 }
 
-export function TopBar({ quote, live, onToggleLive, feedStatus, activeSymbol, onSelectSymbol }: TopBarProps) {
+export function TopBar({
+  quote,
+  live,
+  onToggleLive,
+  feedStatus,
+  activeSymbol,
+  onSelectSymbol,
+  onOpenCommand,
+}: TopBarProps) {
   const { data: account } = useQuery({
     queryKey: ['account'],
     queryFn: api.account,
@@ -98,6 +107,16 @@ export function TopBar({ quote, live, onToggleLive, feedStatus, activeSymbol, on
           <Metric label="Equity" value={accountConnected ? fmtMoney(account?.equity ?? 0) : '—'} />
           <Metric label="Free" value={accountConnected ? fmtMoney(account?.freeMargin ?? 0) : '—'} />
         </div>
+
+        <button
+          onClick={onOpenCommand}
+          className="hidden h-8 items-center gap-2 rounded-lg border border-white/[0.065] bg-white/[0.025] px-2.5 text-[9px] font-bold uppercase tracking-[0.08em] text-fg-500 transition hover:bg-white/[0.05] hover:text-fg-200 xl:flex"
+          title="Open command center · Ctrl/⌘ + K"
+        >
+          <Command className="h-3.5 w-3.5 text-gold-300" />
+          <span>Command</span>
+          <span className="rounded border border-white/[0.06] px-1.5 py-0.5 text-[7px] text-fg-600">⌘K</span>
+        </button>
 
         <div className="flex h-full items-center gap-2 border-l border-white/[0.055] px-3">
           <span className={clsx(
