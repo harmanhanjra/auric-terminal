@@ -13,7 +13,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     MARKET_DATA_SOURCE=auto \
     ENABLE_LIVE_TRADING=false \
     ENABLE_AUTO_LIVE_TRADING=false \
-    AURIC_EXECUTION_STAGE=paper
+    AURIC_EXECUTION_STAGE=paper \
+    AURIC_DB_PATH=/app/data/auric.db
 
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt \
@@ -24,8 +25,10 @@ COPY server.py engine.py execution_v2.py production_control.py multi_engine.py b
 COPY kronos ./kronos
 COPY --from=web-build /build/web/dist ./web/dist
 
-RUN chown -R auric:auric /app
+RUN mkdir -p /app/data && chown -R auric:auric /app
 USER auric
+
+VOLUME ["/app/data"]
 
 EXPOSE 8000
 
