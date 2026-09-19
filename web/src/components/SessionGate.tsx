@@ -5,7 +5,7 @@ import { LockKeyhole, ShieldCheck } from 'lucide-react'
 import { api, getSessionToken, setSessionToken } from '../lib/api'
 import App from '../App'
 import { AuricBackdrop } from './effects/AuricBackdrop'
-import { Button } from './ui/button'
+import { Button } from './ui/Button'
 import { Surface } from './ui/surface'
 
 export function SessionGate() {
