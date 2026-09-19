@@ -101,7 +101,10 @@ class SymbolEngine:
 
         # Per-symbol risk manager
         from engine import RiskManager
-        self.max_spread_points = float(os.getenv("MAX_SPREAD_POINTS", "80"))
+        default_spread = {"XAUUSD": 80.0, "BTCUSD": 1500.0, "EURUSD": 30.0}.get(symbol, 80.0)
+        self.max_spread_points = float(
+            os.getenv(f"MAX_SPREAD_POINTS_{symbol}", os.getenv("MAX_SPREAD_POINTS", str(default_spread)))
+        )
         self.risk = RiskManager(
             daily_loss=max_daily_loss,
             max_lot=max_lot,
