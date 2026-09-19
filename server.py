@@ -976,6 +976,7 @@ async def lifespan(_: FastAPI):
             mt5_timeframes=MT5_TIMEFRAMES,
             engine_mod=None,
             trade_guard_fn=blackout_guard.check,
+            paper_enabled=execution_policy.paper_allowed,
         )
         ENGINES[sym] = eng
         # Start background tasks for every symbol; enable/disable only gates
@@ -1356,7 +1357,7 @@ async def symbol_start(symbol: str, request: Request):
     sym = symbol.upper()
     if sym not in ENGINES:
         raise HTTPException(404, f"Symbol {sym} not tracked")
-    if AUTO_LIVE_ENABLED:
+    if AUTO_LIVE_ENABLED and execution_policy.auto_live_allowed:
         _require_live_auth(request)
     ENGINES[sym].enable()
     return ENGINES[sym].snapshot()
@@ -1378,7 +1379,7 @@ async def all_kronos():
 
 @app.post("/api/engine/start")
 async def engine_start(request: Request):
-    if AUTO_LIVE_ENABLED:
+    if AUTO_LIVE_ENABLED and execution_policy.auto_live_allowed:
         _require_live_auth(request)
     if SYMBOL not in ENGINES:
         raise HTTPException(503, "Primary engine is not initialized")
@@ -1716,6 +1717,8 @@ async def order(req: OrderRequest, request: Request):
             f"Spread guard active ({sp_points:.1f} pts > {spread_limit:.1f} pts for {sym})",
         )
     if req.mode == "paper":
+        if not execution_policy.paper_allowed:
+            raise HTTPException(403, f"Execution stage '{execution_policy.stage}' does not allow paper orders")
         positions_count = len(paper_broker.positions(sym))
         exposure = sum(float(p["lots"]) for p in paper_broker.positions(sym))
     else:
