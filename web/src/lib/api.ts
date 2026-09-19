@@ -8,6 +8,7 @@ import type {
   OrderRequest,
   OrderResult,
   PositionsResponse,
+  PendingOrdersResponse,
   Quote,
   StrategiesResponse,
   KillResult,
@@ -118,6 +119,11 @@ export const api = {
     const params = new URLSearchParams({ mode })
     if (symbol) params.set('symbol', symbol)
     return request<PositionsResponse>(`/api/positions?${params.toString()}`)
+  },
+  pendingOrders: (mode: 'paper' | 'live' | 'all' = 'all', symbol?: string) => {
+    const params = new URLSearchParams({ mode })
+    if (symbol) params.set('symbol', symbol)
+    return request<PendingOrdersResponse>(`/api/pending?${params.toString()}`)
   },
   journal: (limit = 100) => request<JournalResponse>(`/api/journal?limit=${limit}`),
   engine: () => request<EngineStatus>('/api/engine'),
