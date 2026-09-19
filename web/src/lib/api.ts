@@ -100,6 +100,9 @@ export const api = {
     }),
   resumeSystem: () => request<{ ok: boolean }>('/api/system/resume', { method: 'POST' }),
   reconcile: () => request<Record<string, unknown>>('/api/reconcile', { method: 'POST' }),
+  backupNow: () => request<{ ok: boolean; file: string; size: number }>('/api/system/backup', { method: 'POST' }),
+  syncNews: () => request<{ configured: boolean; ingested: number; source?: string }>('/api/news/sync', { method: 'POST' }),
+  metrics: () => request<Record<string, unknown>>('/api/metrics'),
   newsEvents: () => request<{ events: NewsEvent[] }>('/api/news/events'),
   addNewsEvent: (payload: Omit<NewsEvent, 'id' | 'enabled'>) =>
     request<{ ok: boolean; id: number }>('/api/news/events', {
