@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
+import { clsx } from 'clsx'
 import { useQuery } from '@tanstack/react-query'
 import { BrainCircuit, LayoutPanelTop, PanelBottomClose, PanelRightClose, Search } from 'lucide-react'
 import { TopBar } from './components/TopBar'
@@ -23,6 +24,14 @@ import type { Quote } from './lib/types'
 
 export type ViewKey = 'chart' | 'strategies' | 'backtest' | 'positions' | 'risk' | 'journal' | 'alerts' | 'kronos'
 type LayoutPreset = 'execution' | 'research' | 'compact'
+type InspectorTab = 'trade' | 'book' | 'engine' | 'ops'
+
+const INSPECTOR_TABS: { key: InspectorTab; label: string }[] = [
+  { key: 'trade', label: 'Trade' },
+  { key: 'book', label: 'Book' },
+  { key: 'engine', label: 'Engine' },
+  { key: 'ops', label: 'Ops' },
+]
 
 interface WorkspaceLayout {
   sideWidth: number
@@ -57,6 +66,7 @@ export default function App() {
   const [view, setView] = useState<ViewKey>('chart')
   const [live, setLive] = useState(false)
   const [commandOpen, setCommandOpen] = useState(false)
+  const [inspector, setInspector] = useState<InspectorTab>('trade')
   const [layout, setLayout] = useState<WorkspaceLayout>(loadWorkspaceLayout)
   const [activeSymbol, setActiveSymbol] = useState(() => {
     try {
@@ -77,15 +87,15 @@ export default function App() {
 
   const quote: Quote = useMemo(() => {
     const liveQuote = ticks[activeSymbol] ?? symbolSeed ?? undefined
-    if (liveQuote && liveQuote.price > 0) return liveQuote
+    if (liveQuote && liveQuote.price > 0 && Date.now() - liveQuote.timestamp < 15000) return liveQuote
     return {
       symbol: activeSymbol,
-      bid: 5024.36,
-      ask: 5024.54,
-      price: 5024.36,
-      spread: 0.18,
-      source: status === 'connecting' ? 'Connecting' : 'Demo',
-      timestamp: Date.now(),
+      bid: 0,
+      ask: 0,
+      price: 0,
+      spread: 0,
+      source: status === 'connecting' ? 'Connecting to MT5' : 'MT5 unavailable',
+      timestamp: 0,
     }
   }, [ticks, symbolSeed, activeSymbol, status])
 
@@ -175,7 +185,7 @@ export default function App() {
         >
           <Rail view={view} onNavigate={openModule} />
 
-          <main className="relative flex min-h-0 flex-col overflow-hidden bg-ink-950/72 backdrop-blur-[2px]">
+          <main className="relative flex min-h-0 flex-col overflow-hidden">
             <div className="min-h-0 flex-1 overflow-hidden">
               <ChartPanel quote={quote} activeSymbol={activeSymbol} onSelectSymbol={setActiveSymbol} />
             </div>
@@ -190,7 +200,7 @@ export default function App() {
                   aria-label="Resize lower trading dock"
                 />
                 <div
-                  className="shrink-0 overflow-hidden bg-ink-900/72 backdrop-blur-xl"
+                  className="shrink-0 overflow-hidden border-t border-white/[0.06] bg-ink-900/60"
                   style={{ height: layout.dockHeight }}
                 >
                   <Dock quote={quote} live={live} view={view} onNavigate={openModule} />
@@ -256,14 +266,29 @@ export default function App() {
                 aria-orientation="vertical"
                 aria-label="Resize execution sidebar"
               />
-              <aside className="auric-side-panel flex min-h-0 flex-col overflow-hidden bg-ink-900/72 backdrop-blur-xl">
-                <div className="shrink-0 border-b border-white/[0.055]">
-                  <OrderTicket quote={quote} live={live} activeSymbol={activeSymbol} />
+              <aside className="auric-side-panel flex min-h-0 flex-col overflow-hidden">
+                <div className="flex h-11 shrink-0 items-center gap-1 px-2">
+                  {INSPECTOR_TABS.map((tab) => (
+                    <button
+                      key={tab.key}
+                      onClick={() => setInspector(tab.key)}
+                      data-active={inspector === tab.key}
+                      className={clsx(
+                        'auric-toolbar-button flex-1',
+                        inspector === tab.key ? 'text-fg-100' : 'text-fg-500',
+                      )}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
                 </div>
-                <div className="min-h-0 flex-1 overflow-auto">
-                  <ProductionCard activeSymbol={activeSymbol} />
-                  <DepthPanel quote={quote} />
-                  <EngineCard activeSymbol={activeSymbol} />
+                <div className="min-h-0 flex-1 overflow-auto border-t border-white/[0.05]">
+                  {inspector === 'trade' && (
+                    <OrderTicket quote={quote} live={live} activeSymbol={activeSymbol} />
+                  )}
+                  {inspector === 'book' && <DepthPanel quote={quote} />}
+                  {inspector === 'engine' && <EngineCard activeSymbol={activeSymbol} />}
+                  {inspector === 'ops' && <ProductionCard activeSymbol={activeSymbol} />}
                 </div>
               </aside>
             </>

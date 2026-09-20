@@ -134,14 +134,13 @@ def minimum_stop_distance(spec: SymbolSpec) -> float:
 def choose_filling(mt5_mod: Any, spec: SymbolSpec, pending: bool = False) -> int:
     if pending and hasattr(mt5_mod, "ORDER_FILLING_RETURN"):
         return mt5_mod.ORDER_FILLING_RETURN
-    supported = {
-        getattr(mt5_mod, "ORDER_FILLING_FOK", -999),
-        getattr(mt5_mod, "ORDER_FILLING_IOC", -998),
-        getattr(mt5_mod, "ORDER_FILLING_RETURN", -997),
-    }
-    if spec.filling_mode in supported:
-        return int(spec.filling_mode)
-    return getattr(mt5_mod, "ORDER_FILLING_IOC", 1)
+    # SYMBOL_FILLING_* is a bitmask, not an ORDER_FILLING_* enum.
+    flags = spec.filling_mode or 0
+    if flags & 2:
+        return getattr(mt5_mod, "ORDER_FILLING_IOC", 1)
+    if flags & 1:
+        return getattr(mt5_mod, "ORDER_FILLING_FOK", 0)
+    raise ValueError("Broker offers no supported market-order filling policy")
 
 
 class ExecutionLedger:
@@ -160,6 +159,23 @@ class ExecutionLedger:
             "broker_ticket TEXT, payload TEXT NOT NULL, result TEXT)"
         )
         self.db.commit()
+
+    def unresolved(self) -> list[dict]:
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT * FROM execution_ledger WHERE mode='live' AND status='reserved'"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def state(self, key: str, value=None):
+        with self._lock:
+            self.db.execute("CREATE TABLE IF NOT EXISTS agent_state(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            if value is not None:
+                self.db.execute("INSERT OR REPLACE INTO agent_state VALUES(?,?)", (key, json.dumps(value)))
+                self.db.commit()
+                return value
+            row = self.db.execute("SELECT value FROM agent_state WHERE key=?", (key,)).fetchone()
+            return json.loads(row[0]) if row else None
 
     def reserve(self, client_order_id: str, symbol: str, mode: str, order_type: str, payload: dict) -> bool:
         with self._lock:
@@ -191,18 +207,20 @@ class ExecutionLedger:
             self.db.commit()
 
     def lookup(self, client_order_id: str) -> dict | None:
-        row = self.db.execute(
-            "SELECT * FROM execution_ledger WHERE client_order_id=?", (client_order_id,)
-        ).fetchone()
+        with self._lock:
+            row = self.db.execute(
+                "SELECT * FROM execution_ledger WHERE client_order_id=?", (client_order_id,)
+            ).fetchone()
         return dict(row) if row else None
 
     def recent_live_tickets(self, limit: int = 200) -> list[str]:
-        rows = self.db.execute(
-            "SELECT broker_ticket FROM execution_ledger "
-            "WHERE mode='live' AND broker_ticket IS NOT NULL "
-            "ORDER BY ts DESC LIMIT ?",
-            (max(1, min(limit, 1000)),),
-        ).fetchall()
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT broker_ticket FROM execution_ledger "
+                "WHERE mode='live' AND broker_ticket IS NOT NULL "
+                "ORDER BY ts DESC LIMIT ?",
+                (max(1, min(limit, 1000)),),
+            ).fetchall()
         return [str(row["broker_ticket"]) for row in rows if row["broker_ticket"]]
 
 

@@ -34,6 +34,12 @@ def client(tmp_path_factory):
     server.journal = server.Journal(db)
     server.execution_ledger = ExecutionLedger(db)
     server.paper_broker = PaperBroker()
+    server.mt5 = None
+    server.mt5_ready = False
+    async def no_feed():
+        pass
+    server.market_loop = no_feed
+    server.latest_by_symbol = {}
     with TestClient(server.app) as c:
         yield c
 
@@ -147,8 +153,9 @@ def test_monte_carlo_none_pnl(client):
 
 def test_order_paper(client, monkeypatch):
     import server
-    monkeypatch.setattr(server, "latest", {
-        "XAUUSD": {"bid": 5024.36, "ask": 5024.54, "spread": 0.18, "source": "test"}
+    monkeypatch.setattr(server, "latest_by_symbol", {
+        "XAUUSD": {"symbol": "XAUUSD", "bid": 5024.36, "ask": 5024.54,
+                   "spread": 0.18, "source": "test", "timestamp": 1}
     })
     r = client.post("/api/orders", json={
         "side": "buy", "lots": 0.2, "stop_loss": None, "take_profit": None,
@@ -226,14 +233,10 @@ def test_account_unavailable(client):
     assert r.json()["connected"] is False
 
 
-def test_candles_always_available(client):
-    # MT5 is offline in CI. Yahoo may be reachable; otherwise the honest Demo fallback is used.
+def test_candles_require_mt5(client):
     r = client.get("/api/candles?interval=M15")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["source"] in {"Yahoo", "Demo"}
-    assert len(body["values"]) >= 10
-    assert all({"open", "high", "low", "close"} <= set(v) for v in body["values"])
+    assert r.status_code == 503
+    assert "no fallback" in r.json()["detail"]
 
 
 def test_journal(client):
@@ -252,17 +255,14 @@ def test_engine_endpoint(client):
 
 
 
-def test_risk_preview_symbol_aware(client):
+def test_risk_preview_requires_real_account(client):
     r = client.post("/api/risk/preview", json={
         "symbol": "XAUUSD", "side": "buy",
         "entry": 5000, "stop": 4990, "target": 5020,
         "risk_amount": 50, "risk_pct": 1,
     })
-    assert r.status_code == 200
-    body = r.json()
-    assert body["lots"] == pytest.approx(0.05)
-    assert body["riskUsd"] == pytest.approx(50, abs=0.01)
-    assert body["rr"] == pytest.approx(2.0)
+    assert r.status_code == 503
+    assert "MT5 account" in r.json()["detail"]
 
 
 def test_pending_order_requires_entry(client):
@@ -364,3 +364,53 @@ def test_production_status_endpoint(client):
     assert "policy" in body
     assert "reconciliation" in body
     assert "limits" in body
+
+
+def test_symbol_trades_returns_newest_first(client):
+    import server
+    eng = server.ENGINES["XAUUSD"]
+    eng.state["log"].insert(0, {"type": "signal", "side": 1, "reason": "newest-entry", "bar": 1})
+    eng.state["log"].append({"type": "signal", "side": -1, "reason": "oldest-entry", "bar": 0})
+    r = client.get("/api/symbols/XAUUSD/trades?limit=1")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["log"]) == 1
+    assert body["log"][0]["reason"] == "newest-entry"
+    eng.state["log"].pop()  # restore fixture state
+
+
+def test_symbol_trades_caps_limit(client):
+    import server
+    eng = server.ENGINES["XAUUSD"]
+    r = client.get("/api/symbols/XAUUSD/trades?limit=99999")
+    assert r.status_code == 200
+    assert len(r.json()["log"]) <= len(eng.state.get("log", []))
+
+
+def test_kronos_source_has_no_offline_fallback(client, monkeypatch):
+    # MT5 is the sole data authority: the AI loop must never synthesise or pull
+    # third-party candles when the terminal is offline.
+    import asyncio
+    import server
+    monkeypatch.setattr(server, "mt5", None)
+    monkeypatch.setattr(server, "mt5_ready", False)
+    assert asyncio.run(server._kronos_source_candles()) is None
+
+
+def test_kronos_source_uses_only_closed_mt5_bars(client, monkeypatch):
+    import asyncio
+    import server
+    need = server.KRONOS_LOOKBACK + 50
+    rows = [{"time": 1000 + i * 900, "open": 1.0, "high": 1.1,
+             "low": 0.9, "close": 1.0, "tick_volume": 5} for i in range(need)]
+
+    class Stub:
+        def copy_rates_from_pos(self, *args):
+            return rows
+
+    monkeypatch.setattr(server, "mt5", Stub())
+    monkeypatch.setattr(server, "mt5_ready", True)
+    out = asyncio.run(server._kronos_source_candles())
+    assert out is not None
+    assert len(out) == need - 1  # the still-forming bar is dropped
+    assert out[-1]["time"] == rows[-2]["time"]

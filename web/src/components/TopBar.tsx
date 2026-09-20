@@ -61,9 +61,8 @@ export function TopBar({
   return (
     <header className="auric-topbar relative z-20 flex h-14 shrink-0 items-center border-b backdrop-blur-xl">
       <div className="flex h-full w-[204px] shrink-0 items-center gap-3 border-r border-white/[0.055] px-4">
-        <div className="relative grid h-8 w-8 place-items-center rounded-[10px] border border-gold-400/25 bg-gradient-to-b from-gold-400/[0.11] to-ink-900/70 shadow-[0_0_30px_rgba(201,162,39,0.10),inset_0_1px_0_rgba(255,255,255,.05)]">
-          <div className="h-3 w-3 rotate-45 rounded-[2px] border border-gold-300/80 bg-gold-400/20" />
-          <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full border-2 border-ink-950 bg-bull-500" />
+        <div className="grid h-8 w-8 place-items-center rounded-[10px] border border-white/[0.1] bg-white/[0.03]">
+          <div className="h-3 w-3 rotate-45 rounded-[2px] border border-fg-300/70" />
         </div>
         <div className="leading-tight">
           <div className="text-[13px] font-black tracking-[-0.03em] text-fg-100">
@@ -113,7 +112,7 @@ export function TopBar({
           className="hidden h-8 items-center gap-2 rounded-lg border border-white/[0.065] bg-white/[0.025] px-2.5 text-[9px] font-bold uppercase tracking-[0.08em] text-fg-500 transition hover:bg-white/[0.05] hover:text-fg-200 xl:flex"
           title="Open command center · Ctrl/⌘ + K"
         >
-          <Command className="h-3.5 w-3.5 text-gold-300" />
+          <Command className="h-3.5 w-3.5 text-fg-400" />
           <span>Command</span>
           <span className="rounded border border-white/[0.06] px-1.5 py-0.5 text-[7px] text-fg-600">⌘K</span>
         </button>

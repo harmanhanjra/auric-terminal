@@ -1,40 +1,39 @@
-import { useMemo } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { api } from '../lib/api'
 import { Info } from 'lucide-react'
 import { fmtPrice } from '../lib/format'
 import type { Quote } from '../lib/types'
 
 export function DepthPanel({ quote }: { quote: Quote }) {
-  const p = quote.price || 0
-  const sp = Math.max(quote.spread || 0, p ? p * 0.00002 : 0.01)
-
-  // This is intentionally an indicative ladder, not broker L2.  Until a broker
-  // depth adapter is connected we never label generated values as market depth.
-  const ladder = useMemo(() => {
-    const multipliers = [0.6, 1.5, 2.7, 4.1, 5.9]
-    const weights = [1.8, 3.7, 6.4, 9.2, 13.0]
-    return {
-      asks: multipliers.map((m, i) => ({ price: p + sp * m, weight: weights[i] })),
-      bids: multipliers.map((m, i) => ({ price: p - sp * m, weight: weights[i] })),
-    }
-  }, [p, sp])
-
-  const max = 13
+  const { data, isError } = useQuery({
+    queryKey: ['mt5-depth', quote.symbol],
+    queryFn: () => api.depth(quote.symbol),
+    refetchInterval: 3000,
+    retry: false,
+  })
+  const levels = !isError && data?.available ? data.levels : []
+  const ladder = {
+    asks: levels.filter(l => l.side === 'ask').sort((a, b) => a.price - b.price).slice(0, 5).map(l => ({ price: l.price, weight: l.volume })),
+    bids: levels.filter(l => l.side === 'bid').sort((a, b) => b.price - a.price).slice(0, 5).map(l => ({ price: l.price, weight: l.volume })),
+  }
+  const max = Math.max(1, ...levels.map(l => l.volume))
 
   return (
     <section className="border-b border-white/[0.055] bg-ink-900/42 p-3">
       <div className="mb-2 flex items-center justify-between">
         <div>
-          <div className="text-[9px] font-extrabold uppercase tracking-[0.12em] text-fg-400">Indicative Liquidity Ladder</div>
+          <div className="text-[9px] font-extrabold uppercase tracking-[0.12em] text-fg-400">MT5 Market Depth</div>
           <div className="mt-0.5 flex items-center gap-1 text-[8px] text-fg-600">
-            <Info className="h-2.5 w-2.5" /> Generated from spread · not broker L2
+            <Info className="h-2.5 w-2.5" /> Broker supplied order book
           </div>
         </div>
         <span className="rounded-md border border-white/[0.06] bg-white/[0.025] px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-[0.1em] text-fg-500">
-          SYNTHETIC
+          {levels.length ? 'MT5' : 'UNAVAILABLE'}
         </span>
       </div>
 
       <div className="space-y-px text-[9px]">
+        {!levels.length && <p className="py-3 text-fg-500">No broker depth available for {quote.symbol}.</p>}
         {ladder.asks.slice().reverse().map((a, i) => (
           <Level key={`a-${i}`} price={a.price} weight={a.weight} max={max} ask />
         ))}
@@ -58,7 +57,7 @@ function Level({ price, weight, max, ask }: { price: number; weight: number; max
         style={{ width: `${Math.min(100, weight / max * 100)}%` }}
       />
       <span className={`relative tnum font-semibold ${ask ? 'text-bear-400' : 'text-bull-400'}`}>{fmtPrice(price)}</span>
-      <span className="relative tnum text-fg-600">{weight.toFixed(1)} rel</span>
+      <span className="relative tnum text-fg-600">{weight.toLocaleString()}</span>
     </div>
   )
 }

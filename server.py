@@ -1,6 +1,6 @@
 """AuricTerminal market-data and execution gateway.
 
-Data-source priority: MT5 -> Twelve Data -> deterministic demo feed.
+Data-source policy: MT5 is the sole market-data authority; no fallback feeds.
 Real order execution is disabled unless ENABLE_LIVE_TRADING=true.
 """
 from __future__ import annotations
@@ -10,11 +10,12 @@ import hmac
 import json
 import logging
 import os
-import random
+from mt5_data import checked_tick
+from autonomous import AutonomousExecutor
 import secrets
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timezone, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -52,9 +53,7 @@ logger = logging.getLogger("auric")
 
 ROOT = Path(__file__).parent
 SYMBOL = os.getenv("MT5_SYMBOL", "XAUUSD")
-TD_SYMBOL = os.getenv("TWELVE_DATA_SYMBOL", "XAU/USD")
-TD_KEY = os.getenv("TWELVE_DATA_API_KEY", "")
-SOURCE = os.getenv("MARKET_DATA_SOURCE", "auto").lower()
+SOURCE = "mt5"  # MT5 is the sole market-data authority.
 LIVE_ENABLED = os.getenv("ENABLE_LIVE_TRADING", "false").lower() == "true"
 # Manual live execution and autonomous live execution are deliberately separate.
 AUTO_LIVE_ENABLED = os.getenv("ENABLE_AUTO_LIVE_TRADING", "false").lower() == "true"
@@ -197,7 +196,7 @@ async def tg_notify(text: str):
 kronos_task: asyncio.Task | None = None
 
 # ── Multi-symbol engines ─────────────────────────────────────────────────────
-from multi_engine import SymbolEngine, SYMBOLS as ALL_SYMBOLS, SYMBOL_PROPS
+from multi_engine import SymbolEngine, SYMBOLS as ALL_SYMBOLS
 ENGINES: dict[str, SymbolEngine] = {}  # populated in lifespan()
 
 class LoginRequest(BaseModel):
@@ -322,11 +321,20 @@ async def reconciliation_loop():
                 reconciliation.error = None if reconciliation.ok else "MT5 unavailable"
                 reconciliation.last_sync_ms = int(time.time() * 1000)
             else:
-                positions = list(await asyncio.to_thread(mt5.positions_get) or [])
-                orders = list(await asyncio.to_thread(mt5.orders_get) or [])
-                start = datetime.combine(datetime.now().date(), dtime.min)
-                hist_orders = list(await asyncio.to_thread(mt5.history_orders_get, start, datetime.now()) or [])
-                deals = list(await asyncio.to_thread(mt5.history_deals_get, start, datetime.now()) or [])
+                positions = list(await autonomous_executor.call("positions_get"))
+                orders = list(await autonomous_executor.call("orders_get"))
+                now = datetime.now(timezone.utc)
+                start = now - timedelta(days=30)
+                hist_orders = list(await autonomous_executor.call("history_orders_get", start, now))
+                deals = list(await autonomous_executor.call("history_deals_get", start, now))
+                for reserved in execution_ledger.unresolved():
+                    intent = json.loads(reserved["payload"])
+                    comment = intent.get("comment")
+                    matched = [d for d in deals if comment and getattr(d, "comment", None) == comment
+                               and getattr(d, "magic", None) == MAGIC and d.symbol == reserved["symbol"]]
+                    if matched:
+                        execution_ledger.complete(reserved["client_order_id"],
+                                                  {"reconciled": True}, matched[0].order)
                 known: set[str] = set()
                 for row in positions + orders + hist_orders:
                     ticket = getattr(row, "ticket", None)
@@ -341,8 +349,8 @@ async def reconciliation_loop():
                 reconciliation.broker_connected = True
                 reconciliation.position_count = sum(1 for p in positions if getattr(p, "magic", None) == MAGIC)
                 reconciliation.pending_count = sum(1 for p in orders if getattr(p, "magic", None) == MAGIC)
-                reconciliation.ok = not reconciliation.unmatched_tickets
-                reconciliation.error = None if reconciliation.ok else "Execution tickets missing from broker state/history"
+                reconciliation.ok = not reconciliation.unmatched_tickets and not execution_ledger.unresolved()
+                reconciliation.error = None if reconciliation.ok else "Unresolved execution or ticket missing from broker history"
                 reconciliation.last_sync_ms = int(time.time() * 1000)
         except Exception as exc:
             reconciliation.ok = False
@@ -369,7 +377,9 @@ async def init_mt5() -> bool:
     global mt5_ready
     if not mt5 or SOURCE not in ("auto", "mt5"):
         return False
-    kwargs = {}
+    kwargs = {"timeout": 10000}
+    if os.getenv("MT5_PATH"):
+        kwargs["path"] = os.environ["MT5_PATH"]
     if os.getenv("MT5_LOGIN"):
         kwargs["login"] = int(os.environ["MT5_LOGIN"])
     if os.getenv("MT5_PASSWORD"):
@@ -380,6 +390,9 @@ async def init_mt5() -> bool:
     if mt5_ready:
         for sym in ALL_SYMBOLS:
             await asyncio.to_thread(mt5.symbol_select, sym, True)
+    else:
+        detail = getattr(mt5, "last_error", None)
+        logger.warning("MT5 initialize failed: %s", detail() if callable(detail) else detail)
     return mt5_ready
 
 async def mt5_tick():
@@ -392,18 +405,6 @@ async def mt5_tick():
     return {"symbol": SYMBOL, "bid": bid, "ask": ask, "price": (bid + ask) / 2,
             "spread": ask - bid, "source": "MT5", "timestamp": int(tick.time_msc)}
 
-async def twelve_data_tick(client: httpx.AsyncClient):
-    if not TD_KEY or SOURCE not in ("auto", "web", "twelvedata"):
-        return None
-    response = await client.get("https://api.twelvedata.com/price",
-                                params={"symbol": TD_SYMBOL, "apikey": TD_KEY}, timeout=8)
-    payload = response.json()
-    if "price" not in payload:
-        raise RuntimeError(payload.get("message", "Twelve Data returned no price"))
-    price = float(payload["price"])
-    return {"symbol": SYMBOL, "bid": price, "ask": price, "price": price,
-            "spread": 0.0, "source": "Twelve Data", "timestamp": int(time.time() * 1000)}
-
 async def broadcast(data: dict):
     # Paper positions and pending orders are advanced by the same normalized
     # market ticks used by the UI, so paper mode has real lifecycle semantics.
@@ -411,7 +412,7 @@ async def broadcast(data: dict):
         data.get("symbol", SYMBOL),
         float(data.get("bid", 0) or 0),
         float(data.get("ask", 0) or 0),
-    )
+    ) if data.get("available", True) else []
     for event in events:
         if event.get("type") == "close":
             journal.add(
@@ -437,51 +438,35 @@ async def broadcast(data: dict):
         clients.discard(ws)
 
 async def market_loop():
-    global latest
-    # Honest deterministic-ish fallback scales per asset instead of pretending
-    # every symbol trades like gold.
-    demos = {"XAUUSD": 5000.0, "BTCUSD": 97000.0, "EURUSD": 1.0850}
-    demo_half_spread = {"XAUUSD": 0.09, "BTCUSD": 4.0, "EURUSD": 0.00005}
-    demo_move = {"XAUUSD": 0.45, "BTCUSD": 18.0, "EURUSD": 0.00008}
-    async with httpx.AsyncClient() as client:
-        await init_mt5()
-        while True:
-            overall_latest = {}
+    global latest, mt5_ready
+    last_connect = 0.0
+    while True:
+        try:
+            terminal = await asyncio.to_thread(mt5.terminal_info) if mt5 else None
+            mt5_ready = bool(terminal and terminal.connected)
+            if not mt5_ready and time.monotonic() - last_connect > 30:
+                last_connect = time.monotonic()
+                await init_mt5()
             for sym in ALL_SYMBOLS:
-                tick = None
                 try:
-                    if mt5_ready and mt5:
-                        # try direct tick from MT5 for this symbol
-                        t = await asyncio.to_thread(mt5.symbol_info_tick, sym)
-                        if t:
-                            bid, ask = float(t.bid), float(t.ask)
-                            tick = {"symbol": sym, "bid": bid, "ask": ask, "price": (bid + ask) / 2,
-                                    "spread": ask - bid, "source": "MT5", "timestamp": int(t.time_msc)}
-                except Exception:
-                    pass
-                if tick is None:
-                    # Twelve Data only for primary symbol mapping
-                    if sym == SYMBOL:
-                        try:
-                            tick = await twelve_data_tick(client)
-                        except Exception:
-                            pass
-                if tick is None:
-                    demo_price = demos.get(sym, 100.0)
-                    delta = demo_move.get(sym, max(demo_price * 0.0001, 0.00001))
-                    floor = 0.00001 if demo_price < 10 else 1.0
-                    demo_price = max(floor, demo_price + random.uniform(-delta, delta))
-                    demos[sym] = demo_price
-                    half = demo_half_spread.get(sym, max(demo_price * 0.00002, 0.00001))
-                    tick = {"symbol": sym, "bid": demo_price - half, "ask": demo_price + half,
-                            "price": demo_price, "spread": half * 2, "source": "Demo",
-                            "timestamp": int(time.time() * 1000)}
-                overall_latest[sym] = tick
+                    if not mt5_ready:
+                        raise ValueError("MT5 disconnected")
+                    raw = await asyncio.to_thread(mt5.symbol_info_tick, sym)
+                    bid, ask, stamp = checked_tick(raw, float(os.getenv("MAX_TICK_AGE_SECONDS", "15")))
+                    tick = dict(symbol=sym, bid=bid, ask=ask, price=(bid + ask)/2,
+                                spread=ask-bid, timestamp=stamp, source="MT5", available=True)
+                except Exception as exc:
+                    tick = dict(symbol=sym, bid=0.0, ask=0.0, price=0.0, spread=0.0,
+                                timestamp=0, source="Unavailable", available=False, error=str(exc))
+                latest_by_symbol[sym] = tick
+                if sym == SYMBOL:
+                    latest = tick
                 await broadcast(tick)
-            latest_by_symbol.clear()
-            latest_by_symbol.update(overall_latest)
-            latest = overall_latest.get(SYMBOL, {"symbol": SYMBOL, "source": "none"})
-            await asyncio.sleep(0.5)
+        except Exception as exc:
+            logger.warning("MT5 feed: %s", exc)
+            mt5_ready = False
+        await asyncio.sleep(1)
+
 
 def engine_snapshot():
     # V2 uses one SymbolEngine implementation for every symbol.  The legacy
@@ -536,8 +521,9 @@ def _engine_log(entry):
 async def update_realized():
     if not mt5_ready or not mt5:
         return
-    start = datetime.combine(datetime.now().date(), dtime.min)
-    deals = await asyncio.to_thread(mt5.history_deals_get, start, datetime.now()) or []
+    now = datetime.now(timezone.utc)
+    start = datetime.combine(now.date(), dtime.min, tzinfo=timezone.utc)
+    deals = await asyncio.to_thread(mt5.history_deals_get, start, now) or []
     risk.realized = sum(
         float(getattr(d, "profit", 0.0) or 0.0)
         + float(getattr(d, "commission", 0.0) or 0.0)
@@ -791,66 +777,41 @@ async def engine_step():
 # ---------------------------------------------------------------------------
 
 async def _kronos_source_candles() -> list[dict] | None:
-    """Best-effort candle source for the Kronos loop: MT5 -> Yahoo -> Demo."""
+    """Closed MT5 candles for the Kronos loop, or None when MT5 is unavailable.
+
+    MT5 is the sole market-data authority: the AI loop must never fall back to
+    synthetic or third-party series that would diverge from what actually
+    triggers execution.
+    """
     need = KRONOS_LOOKBACK + 50
-    if mt5_ready and mt5:
-        tf = MT5_TIMEFRAMES.get(ENGINE_CONFIG["timeframe"])
-        if tf:
-            try:
-                rates = await asyncio.to_thread(
-                    mt5.copy_rates_from_pos, SYMBOL, tf, 0, need)
-                if rates is not None and len(rates) >= KRONOS_LOOKBACK + 1:
-                    return [
-                        {"time": int(r["time"]), "open": float(r["open"]),
-                         "high": float(r["high"]), "low": float(r["low"]),
-                         "close": float(r["close"]),
-                         "volume": float(r["tick_volume"])}
-                        for r in rates
-                    ]
-            except Exception as exc:
-                logger.warning("Kronos MT5 fetch failed: %s", exc)
-    # Yahoo fallback (optional dependency)
-    try:
-        yf = await asyncio.to_thread(__import__, "yfinance")
-    except Exception:
-        yf = None
-    if yf is not None:
-        try:
-            yf_interval, yf_period = _YF_INTERVAL_MAP.get(
-                ENGINE_CONFIG["timeframe"], ("15m", "60d"))
-            ticker_map = {"XAUUSD": "GC=F"}
-            df = await asyncio.to_thread(
-                lambda: yf.Ticker(ticker_map.get(SYMBOL, SYMBOL)).history(
-                    period=yf_period, interval=yf_interval))
-            if df is not None and len(df) >= KRONOS_LOOKBACK + 1:
-                out = []
-                for idx, row in df.tail(need).iterrows():
-                    try:
-                        ts = int(idx.timestamp())
-                    except Exception:
-                        continue
-                    out.append({"time": ts, "open": float(row["Open"]),
-                                "high": float(row["High"]), "low": float(row["Low"]),
-                                "close": float(row["Close"]),
-                                "volume": float(row.get("Volume", 0) or 0)})
-                if len(out) >= KRONOS_LOOKBACK + 1:
-                    return out
-        except Exception as exc:
-            logger.warning("Kronos Yahoo fetch failed: %s", exc)
-    # Demo series keeps the AI loop alive offline (honestly labelled).
-    try:
-        return [{"time": int(c["time"] / 1000), "open": c["open"],
-                 "high": c["high"], "low": c["low"], "close": c["close"],
-                 "volume": c["volume"]}
-                for c in _demo_candles(SYMBOL, ENGINE_CONFIG["timeframe"], need)]
-    except Exception:
+    if not mt5_ready or not mt5:
         return None
+    tf = MT5_TIMEFRAMES.get(ENGINE_CONFIG["timeframe"])
+    if not tf:
+        return None
+    try:
+        rates = await asyncio.to_thread(
+            mt5.copy_rates_from_pos, SYMBOL, tf, 0, need)
+    except Exception as exc:
+        logger.warning("Kronos MT5 fetch failed: %s", exc)
+        return None
+    if rates is None or len(rates) < KRONOS_LOOKBACK + 2:
+        return None
+    # copy_rates_from_pos is oldest-first: the last element is the still-forming
+    # bar and must not feed the model.
+    return [
+        {"time": int(r["time"]), "open": float(r["open"]),
+         "high": float(r["high"]), "low": float(r["low"]),
+         "close": float(r["close"]),
+         "volume": float(r["tick_volume"])}
+        for r in rates[:-1]
+    ]
 
 
 async def kronos_forecast_loop():
     """Periodically forecast direction using Kronos on live MT5 candles."""
     global KRONOS_CACHE
-    # wait briefly for MT5; proceed with Yahoo/Demo sources when offline
+    # Wait briefly for MT5; without it the loop simply reports no forecast.
     for _ in range(15):
         if mt5_ready:
             break
@@ -942,6 +903,20 @@ async def engine_loop():
             ENGINE_STATE["error"] = str(exc)
         await asyncio.sleep(3)
 
+def autonomous_guard(symbol):
+    if risk.halted:
+        return {"allowed": False, "reason": "Global kill switch is active"}
+    if not AUTO_LIVE_ENABLED or not execution_policy.auto_live_allowed:
+        return {"allowed": False, "reason": "Autonomous live execution is not armed"}
+    recon = reconciliation.payload()
+    if not recon["ok"] or recon["ageMs"] is None or recon["ageMs"] > 45000:
+        return {"allowed": False, "reason": "Broker reconciliation is not healthy/fresh"}
+    return blackout_guard.check(symbol)
+
+
+autonomous_executor = AutonomousExecutor(mt5, execution_ledger, MAGIC, autonomous_guard)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global feed_task, engine_task, kronos_task, mt5_ready, reconciliation_task
@@ -977,7 +952,8 @@ async def lifespan(_: FastAPI):
             mt5_timeframes=MT5_TIMEFRAMES,
             engine_mod=None,
             trade_guard_fn=blackout_guard.check,
-            paper_enabled=execution_policy.paper_allowed,
+            paper_enabled=False,
+            executor=autonomous_executor,
         )
         ENGINES[sym] = eng
         # Start background tasks for every symbol; enable/disable only gates
@@ -1174,6 +1150,8 @@ async def health():
         "source": latest.get("source"),
         "liveTrading": LIVE_ENABLED,
         "autoLiveTrading": AUTO_LIVE_ENABLED,
+        "dataPolicy": "MT5_ONLY",
+        "autonomous": autonomous_executor.last,
         "environment": ENVIRONMENT,
         "executionStage": execution_policy.stage,
         "authRequired": operator_auth.require_auth,
@@ -1201,6 +1179,25 @@ async def quote():
 async def strategies():
     return {"strategies": [{"id": i, "name": n, "category": c} for i, n, c in STRATEGIES],
             "positionSizing": SIZERS}
+
+
+@app.get("/api/depth/{symbol}")
+async def market_depth(symbol: str):
+    sym = symbol.upper()
+    if sym not in ALL_SYMBOLS:
+        raise HTTPException(422, "Untracked symbol")
+    if not mt5_ready or not mt5:
+        raise HTTPException(503, "MT5 disconnected")
+    if not await asyncio.to_thread(mt5.market_book_add, sym):
+        return {"symbol": sym, "source": "MT5", "available": False, "levels": []}
+    try:
+        rows = await asyncio.to_thread(mt5.market_book_get, sym)
+        levels = [{"side": "ask" if r.type == 1 else "bid", "price": r.price,
+                   "volume": getattr(r, "volume_dbl", r.volume)}
+                  for r in (rows or ()) if r.type in (1, 2)]
+        return {"symbol": sym, "source": "MT5", "available": bool(levels), "levels": levels}
+    finally:
+        await asyncio.to_thread(mt5.market_book_release, sym)
 
 @app.post("/api/backtest")
 async def run_backtest(req: BacktestRequest):
@@ -1263,72 +1260,16 @@ async def symbol_quote(symbol: str):
     if sym not in ALL_SYMBOLS:
         raise HTTPException(422, f"Symbol {sym} not tracked. Available: {ALL_SYMBOLS}")
 
-    if mt5_ready and mt5:
-        try:
-            t = await asyncio.to_thread(mt5.symbol_info_tick, sym)
-            if t:
-                bid, ask = float(t.bid), float(t.ask)
-                return {
-                    "symbol": sym, "bid": bid, "ask": ask, "price": (bid + ask) / 2,
-                    "spread": ask - bid, "source": "MT5",
-                    "timestamp": int(getattr(t, "time_msc", time.time() * 1000)),
-                }
-        except Exception:
-            pass
-
-    cache = latest_by_symbol.get(sym)
-    if isinstance(cache, dict) and cache.get("source"):
-        # Live broadcast cache is fresh (<5s old) — prefer it over Yahoo.
-        try:
-            age_ms = int(time.time() * 1000) - int(cache.get("timestamp", 0))
-        except Exception:
-            age_ms = 10 ** 9
-        if cache.get("source") == "MT5" or age_ms < 5000:
-            return cache
-
-    # Yahoo Finance fallback for real-time quote (optional dependency)
-    YAHOO_TICKERS = {
-        "XAUUSD": "GC=F", "BTCUSD": "BTC-USD",
-        "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X",
-        "USDJPY": "USDJPY=X", "EURJPY": "EURJPY=X",
-        "AUDUSD": "AUDUSD=X", "USDCAD": "USDCAD=X",
-        "USDCHF": "USDCHF=X", "NZDUSD": "NZDUSD=X",
-    }
-    yahoo_sym = YAHOO_TICKERS.get(sym, SYMBOL_PROPS.get(sym, {}).get("td_symbol", sym))
+    if not mt5_ready or not mt5:
+        raise HTTPException(503, "MT5 disconnected; no fallback data is permitted")
     try:
-        yf = await asyncio.to_thread(__import__, "yfinance")
-    except Exception:
-        yf = None
-    if yf is not None:
-        try:
-            ticker = yf.Ticker(yahoo_sym)
-            info = await asyncio.to_thread(lambda: ticker.info)
-            price = float(info.get("regularMarketPrice", 0) or info.get("previousClose", 0) or 0)
-            if price <= 0:
-                hist = await asyncio.to_thread(lambda: ticker.history(period="1d"))
-                if hist is not None and not hist.empty:
-                    price = float(hist["Close"].iloc[-1])
-            if price > 0:
-                spread_est = price * 0.0001 if "XAUUSD" not in sym and "BTC" not in sym else 0.50
-                return {
-                    "symbol": sym, "bid": price - spread_est, "ask": price + spread_est,
-                    "price": price, "spread": spread_est * 2, "source": "Yahoo",
-                    "timestamp": int(time.time() * 1000),
-                }
-        except Exception as exc:
-            logger.warning("Yahoo quote failed for %s: %s", sym, exc)
+        raw = await asyncio.to_thread(mt5.symbol_info_tick, sym)
+        bid, ask, stamp = checked_tick(raw, float(os.getenv("MAX_TICK_AGE_SECONDS", "15")))
+    except ValueError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return dict(symbol=sym, bid=bid, ask=ask, price=(bid+ask)/2, spread=ask-bid,
+                source="MT5", timestamp=stamp, available=True)
 
-    if isinstance(cache, dict) and cache.get("source"):
-        return cache
-
-    # Last resort: stable fallback
-    seed = 4000.0 if sym == "XAUUSD" else (70000.0 if sym == "BTCUSD" else 1.0)
-    base = 1.08 if sym == "EURUSD" else (1.27 if sym == "GBPUSD" else (149.0 if sym == "USDJPY" else seed))
-    price = float(base)
-    return {
-        "symbol": sym, "bid": price - 0.05, "ask": price + 0.05, "price": price,
-        "spread": 0.10, "source": "Fallback", "timestamp": int(time.time() * 1000),
-    }
 
 @app.get("/api/symbols/{symbol}/trades")
 async def symbol_trades(symbol: str, limit: int = 200):
@@ -1336,8 +1277,9 @@ async def symbol_trades(symbol: str, limit: int = 200):
     if sym not in ENGINES:
         raise HTTPException(404, f"Symbol {sym} not tracked")
     eng = ENGINES[sym]
-    # SymbolEngine keeps trades count and log; return log entries
-    log = eng.state.get("log", [])[-limit:]
+    # The engine log is newest-first (insert at index 0); return newest entries.
+    capped = max(1, min(int(limit), 200))
+    log = eng.state.get("log", [])[:capped]
     return {"symbol": sym, "trades": eng.state.get("trades", 0), "log": log}
 
 @app.get("/api/symbols/{symbol}/metrics")
@@ -1470,10 +1412,16 @@ async def risk_preview(req: RiskPreviewRequest):
     sym = req.symbol.upper()
     if sym not in ALL_SYMBOLS:
         raise HTTPException(422, f"Symbol {sym} not tracked")
+    if not mt5_ready or not mt5:
+        raise HTTPException(503, "MT5 account and symbol specifications are required for risk preview")
     info = await asyncio.to_thread(mt5.symbol_info, sym) if mt5_ready and mt5 else None
-    spec = spec_from_info(sym, info) if info else fallback_spec(sym)
+    if info is None:
+        raise HTTPException(503, "MT5 symbol specifications unavailable")
+    spec = spec_from_info(sym, info)
     account_info = await asyncio.to_thread(mt5.account_info) if mt5_ready and mt5 else None
-    equity = float(account_info.equity) if account_info else 10000.0
+    if account_info is None:
+        raise HTTPException(503, "MT5 account unavailable")
+    equity = float(account_info.equity)
     effective_pct = req.risk_pct
     if req.risk_amount is not None:
         effective_pct = min(10.0, req.risk_amount / max(equity, 1e-9) * 100.0)
@@ -1504,60 +1452,6 @@ async def risk_preview(req: RiskPreviewRequest):
     }
 
 
-#: Canonical interval -> Yahoo Finance interval + suitable history period.
-_YF_INTERVAL_MAP = {
-    "M1": ("1m", "7d"), "1min": ("1m", "7d"),
-    "M5": ("5m", "60d"), "5min": ("5m", "60d"),
-    "M15": ("15m", "60d"), "15min": ("15m", "60d"),
-    "M30": ("30m", "60d"), "30min": ("30m", "60d"),
-    "H1": ("1h", "730d"), "1h": ("1h", "730d"),
-    "H4": ("1h", "730d"), "4h": ("1h", "730d"),
-    "D1": ("1d", "5y"), "1day": ("1d", "5y"),
-    "W1": ("1wk", "max"), "1week": ("1wk", "max"),
-}
-
-_INTERVAL_SECONDS = {
-    "M1": 60, "1min": 60, "M5": 300, "5min": 300,
-    "M15": 900, "15min": 900, "M30": 1800, "30min": 1800,
-    "H1": 3600, "1h": 3600, "H4": 14400, "4h": 14400,
-    "D1": 86400, "1day": 86400, "W1": 604800, "1week": 604800,
-}
-
-_DEMO_BASE_PRICE = {
-    "XAUUSD": 5000.0, "BTCUSD": 97000.0, "EURUSD": 1.0850,
-    "GBPUSD": 1.2700, "USDJPY": 149.50, "USDCHF": 0.8900,
-    "AUDUSD": 0.6600, "NZDUSD": 0.6000, "USDCAD": 1.3600,
-}
-
-
-def _demo_candles(symbol: str, interval: str, outputsize: int) -> list[dict]:
-    """Deterministic synthetic candles so the terminal always renders.
-
-    Seeded per symbol+interval for stability across reloads; always
-    labelled ``source="Demo"`` so it is never mistaken for market data.
-    """
-    import math as _math
-    step = _INTERVAL_SECONDS.get(interval, 900)
-    base = _DEMO_BASE_PRICE.get(symbol, 100.0)
-    seed = abs(hash((symbol, interval))) % (2 ** 32)
-    now_ms = int(time.time() * 1000)
-    start_ms = now_ms - outputsize * step * 1000
-    out: list[dict] = []
-    price = base
-    for i in range(outputsize):
-        seed = (seed * 1664525 + 1013904223) % 4294967296
-        r = seed / 4294967296 - 0.47
-        o = price
-        c = o + r * base * 0.0012 + _math.sin(i / 17) * base * 0.0002
-        h = max(o, c) + base * 0.0004 + (i % 7) * base * 0.00003
-        lo = min(o, c) - base * 0.0004 - (i % 5) * base * 0.00003
-        out.append({"time": start_ms + i * step * 1000, "open": round(o, 5),
-                    "high": round(h, 5), "low": round(lo, 5),
-                    "close": round(c, 5), "volume": float(100 + (i % 31) * 8)})
-        price = c
-    return out
-
-
 @app.get("/api/candles")
 async def candles(symbol: str = SYMBOL, interval: str = "M15", outputsize: int = 300):
     sym = symbol.upper()
@@ -1567,7 +1461,7 @@ async def candles(symbol: str = SYMBOL, interval: str = "M15", outputsize: int =
         raise HTTPException(422, "Unsupported interval")
     outputsize = max(10, min(outputsize, 5000))
     tf = MT5_TIMEFRAMES.get(interval)
-    if mt5_ready and mt5 and tf:
+    if mt5_ready and mt5 and tf is not None:
         rates = await asyncio.to_thread(mt5.copy_rates_from_pos, sym, tf, 0, outputsize)
         if rates is not None and len(rates):
             values = [{"time": int(r["time"]) * 1000, "open": float(r["open"]),
@@ -1576,71 +1470,8 @@ async def candles(symbol: str = SYMBOL, interval: str = "M15", outputsize: int =
                       for r in rates]
             return {"symbol": sym, "interval": interval, "source": "MT5", "values": values}
         raise HTTPException(502, "MT5 returned no candles for this symbol/timeframe")
-    # Yahoo Finance fallback when MT5 not available (optional dependency).
-    YAHOO_MAP = {
-        "XAUUSD": "GC=F",
-        "BTCUSD": "BTC-USD",
-        "EURUSD": "EURUSD=X",
-        "GBPUSD": "GBPUSD=X",
-        "USDJPY": "USDJPY=X",
-        "EURJPY": "EURJPY=X",
-        "AUDUSD": "AUDUSD=X",
-        "USDCAD": "USDCAD=X",
-        "USDCHF": "USDCHF=X",
-        "NZDUSD": "NZDUSD=X",
-    }
-    yahoo_ticker = YAHOO_MAP.get(sym, SYMBOL_PROPS.get(sym, {}).get("td_symbol", sym))
-    yf_interval, yf_period = _YF_INTERVAL_MAP.get(interval, ("1d", "5y"))
-    try:
-        yf = await asyncio.to_thread(__import__, "yfinance")
-    except Exception:
-        yf = None
-    if yf is not None:
-        try:
-            df = await asyncio.to_thread(
-                lambda: yf.Ticker(yahoo_ticker).history(period=yf_period, interval=yf_interval))
-            if df is not None and not df.empty:
-                if interval in ("H4", "4h"):
-                    # aggregate 1h bars into 4h blocks
-                    rows = []
-                    buf = []
-                    for idx, row in df.iterrows():
-                        buf.append((idx, row))
-                        if len(buf) == 4:
-                            o = float(buf[0][1]["Open"])
-                            h = max(float(r[1]["High"]) for r in buf)
-                            lo = min(float(r[1]["Low"]) for r in buf)
-                            c = float(buf[-1][1]["Close"])
-                            v = float(sum(float(r[1].get("Volume", 0) or 0) for r in buf))
-                            rows.append((buf[-1][0], o, h, lo, c, v))
-                            buf = []
-                    values = [{"time": int(ts.timestamp() * 1000), "open": o,
-                               "high": h, "low": lo, "close": c, "volume": v}
-                              for ts, o, h, lo, c, v in rows[-outputsize:]]
-                else:
-                    values = []
-                    for idx, row in df.tail(outputsize).iterrows():
-                        try:
-                            ts = int(idx.timestamp() * 1000)
-                        except Exception:
-                            continue
-                        values.append({
-                            "time": ts,
-                            "open": float(row["Open"]),
-                            "high": float(row["High"]),
-                            "low": float(row["Low"]),
-                            "close": float(row["Close"]),
-                            "volume": float(row.get("Volume", 0) or 0),
-                        })
-                if values:
-                    return {"symbol": sym, "interval": interval, "source": "Yahoo", "values": values}
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.warning("Yahoo candles failed for %s: %s", sym, exc)
-    # Last resort: deterministic demo series so the chart always renders.
-    return {"symbol": sym, "interval": interval, "source": "Demo",
-            "values": _demo_candles(sym, interval, outputsize)}
+    raise HTTPException(503, "MT5 disconnected; no fallback candles are permitted")
+
 
 @app.get("/api/brain/setup")
 async def brain_setup(symbol: str = SYMBOL, interval: str = "M15", lookback: int = 200):
@@ -1667,20 +1498,23 @@ async def ws_market(ws: WebSocket):
             return
     await ws.accept()
     clients.add(ws)
-    primary = latest_by_symbol.get(SYMBOL)
-    if isinstance(primary, dict) and primary.get("symbol"):
-        await ws.send_json({"type": "tick", **primary})
-    elif isinstance(latest, dict) and latest.get("symbol"):
-        await ws.send_json({"type": "tick", **latest})
-    else:
-        await ws.send_json({"type": "tick", "symbol": SYMBOL, "bid": 0.0,
-                            "ask": 0.0, "price": 0.0, "spread": 0.0,
-                            "source": "connecting",
-                            "timestamp": int(time.time() * 1000)})
     try:
+        primary = latest_by_symbol.get(SYMBOL)
+        if isinstance(primary, dict) and primary.get("symbol"):
+            await ws.send_json({"type": "tick", **primary})
+        elif isinstance(latest, dict) and latest.get("symbol"):
+            await ws.send_json({"type": "tick", **latest})
+        else:
+            await ws.send_json({"type": "tick", "symbol": SYMBOL, "bid": 0.0,
+                                "ask": 0.0, "price": 0.0, "spread": 0.0,
+                                "source": "connecting",
+                                "timestamp": int(time.time() * 1000)})
         while True:
             await ws.receive_text()  # client heartbeat
     except WebSocketDisconnect:
+        pass
+    finally:
+        # Never leak a dead socket into the broadcast set.
         clients.discard(ws)
 
 @app.post("/api/orders")
@@ -1695,13 +1529,16 @@ async def order(req: OrderRequest, request: Request):
         raise HTTPException(422, "Limit/stop orders require entry_price")
     if req.lots > MAX_LOT:
         raise HTTPException(422, f"Lot size exceeds server hard cap ({MAX_LOT})")
+    if req.mode == "live":
+        if not LIVE_ENABLED or not execution_policy.live_manual_allowed:
+            raise HTTPException(403, "Manual live execution is disabled")
+        _require_live_auth(request)
+        if execution_policy.auto_live_allowed:
+            raise HTTPException(409, "Manual entries are disabled while autonomous execution owns the portfolio")
 
     tick_info = latest_by_symbol.get(sym, {})
-    if not tick_info and isinstance(latest, dict):
-        if latest.get("symbol") == sym:
-            tick_info = latest
-        elif isinstance(latest.get(sym), dict):
-            tick_info = latest[sym]
+    if not tick_info and isinstance(latest, dict) and latest.get("symbol") == sym:
+        tick_info = latest
     bid = float(tick_info.get("bid", 0) or 0)
     ask = float(tick_info.get("ask", 0) or 0)
     if bid <= 0 or ask <= 0:
@@ -1822,7 +1659,7 @@ async def order(req: OrderRequest, request: Request):
         }
         check = await asyncio.to_thread(mt5.order_check, mt5_request)
         valid_codes = {0, getattr(mt5, "TRADE_RETCODE_DONE", 10009), getattr(mt5, "TRADE_RETCODE_PLACED", 10008)}
-        if check is not None and getattr(check, "retcode", 0) not in valid_codes:
+        if check is None or getattr(check, "retcode", -1) not in valid_codes:
             raise HTTPException(422, f"MT5 preflight rejected order: {getattr(check, 'comment', 'unknown')}")
         result = await asyncio.to_thread(mt5.order_send, mt5_request)
         accepted_codes = {getattr(mt5, "TRADE_RETCODE_DONE", 10009), getattr(mt5, "TRADE_RETCODE_PLACED", 10008)}

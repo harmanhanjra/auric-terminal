@@ -111,6 +111,10 @@ class OperatorAuth:
 
 
 class TokenBucketLimiter:
+    #: Hard cap on tracked buckets so internet-facing deployments cannot leak
+    #: memory through one key per unique client/path combination.
+    MAX_KEYS = 10_000
+
     def __init__(self, capacity: int = 30, refill_per_sec: float = 0.5):
         self.capacity = max(1, capacity)
         self.refill = max(0.01, refill_per_sec)
@@ -120,6 +124,12 @@ class TokenBucketLimiter:
     def allow(self, key: str, cost: float = 1.0) -> bool:
         now = time.monotonic()
         with self._lock:
+            if key not in self._state and len(self._state) >= self.MAX_KEYS:
+                # Evict idle buckets; drop everything if an eviction storm hits.
+                idle_cutoff = now - 10 * self.capacity / self.refill
+                self._state = {k: v for k, v in self._state.items() if v[1] >= idle_cutoff}
+                if len(self._state) >= self.MAX_KEYS:
+                    self._state.clear()
             tokens, last = self._state.get(key, (float(self.capacity), now))
             tokens = min(float(self.capacity), tokens + (now - last) * self.refill)
             if tokens < cost:
@@ -166,11 +176,12 @@ class AuditLog:
             self.db.commit()
 
     def recent(self, limit: int = 100) -> list[dict[str, Any]]:
-        rows = self.db.execute(
-            "SELECT id,ts,actor,action,resource,outcome,request_id,remote,details "
-            "FROM audit_events ORDER BY id DESC LIMIT ?",
-            (max(1, min(limit, 1000)),),
-        ).fetchall()
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT id,ts,actor,action,resource,outcome,request_id,remote,details "
+                "FROM audit_events ORDER BY id DESC LIMIT ?",
+                (max(1, min(limit, 1000)),),
+            ).fetchall()
         out = []
         for row in rows:
             item = dict(row)
@@ -212,12 +223,17 @@ class BlackoutGuard:
             return
         p = Path(self.path)
         if not p.exists():
-            self._events = []
-            return
+            raise ValueError("Configured economic calendar file is missing")
         stat = p.stat()
-        if stat.st_mtime == self._mtime:
+        if stat.st_mtime == self._mtime and os.getenv("REQUIRE_ECONOMIC_CALENDAR", "false").lower() != "true":
             return
         data = json.loads(p.read_text(encoding="utf-8"))
+        if os.getenv("REQUIRE_ECONOMIC_CALENDAR", "false").lower() == "true":
+            if not isinstance(data, dict) or not data.get("valid_until"):
+                raise ValueError("Calendar requires a provider validity timestamp")
+            expiry = datetime.fromisoformat(data["valid_until"].replace("Z", "+00:00"))
+            if expiry.tzinfo is None or expiry.timestamp() <= time.time():
+                raise ValueError("Economic calendar coverage has expired")
         events: list[BlackoutEvent] = []
         for row in data if isinstance(data, list) else data.get("events", []):
             if str(row.get("importance", "high")).lower() not in ("high", "critical"):
@@ -246,6 +262,8 @@ class BlackoutGuard:
             # For live trading, malformed configured calendar data should fail closed.
             return {"allowed": False, "reason": f"Calendar guard error: {exc}", "event": None}
         if not self.path:
+            if os.getenv("REQUIRE_ECONOMIC_CALENDAR", "false").lower() == "true":
+                return {"allowed": False, "reason": "Economic calendar provider is required", "event": None}
             return {"allowed": True, "reason": "No calendar provider file configured", "event": None}
         now = now_ms if now_ms is not None else int(time.time() * 1000)
         sym = symbol.upper()

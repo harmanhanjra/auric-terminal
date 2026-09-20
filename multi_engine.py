@@ -9,18 +9,13 @@ import asyncio
 import logging
 import os
 import time
-from datetime import datetime, time as dtime
+from mt5_data import checked_tick, checked_bars
+from datetime import datetime, time as dtime, timezone
 from typing import Any, Dict, List
 
 from execution_v2 import (
-    choose_filling,
-    fallback_spec,
-    minimum_stop_distance,
     normalize_price,
-    normalize_volume,
-    position_size_for_risk,
     spec_from_info,
-    spread_points,
 )
 
 logger = logging.getLogger("auric.multi")
@@ -57,7 +52,8 @@ class SymbolEngine:
                  magic: int, live_enabled: bool, max_lot: float,
                  max_daily_loss: float, journal, tg_notify_fn,
                  kronos_engine_mod, kronos_ok: bool, mt5_timeframes: dict,
-                 engine_mod, trade_guard_fn=None, paper_enabled: bool = True):
+                 engine_mod, trade_guard_fn=None, paper_enabled: bool = True, executor=None):
+        self.executor = executor
         self.symbol = symbol
         self.mt5 = mt5_mod
         self._mt5_ready = mt5_ready_ref  # shared mutable ref
@@ -79,20 +75,21 @@ class SymbolEngine:
             "enabled": os.getenv("ENGINE_ENABLED", "true").lower() == "true",
             "strategy": os.getenv("ENGINE_STRATEGY", "ema144_pullback"),
             "timeframe": os.getenv("ENGINE_TIMEFRAME", "M15"),
-            "risk_pct": float(os.getenv("ENGINE_RISK_PCT", "1")),
-            "sizer": os.getenv("ENGINE_SIZER", "fixed_fractional"),
+            "risk_pct": min(float(os.getenv("ENGINE_RISK_PCT", "0.5")), float(os.getenv("MAX_TRADE_RISK_PCT", "0.5"))),
+            "sizer": "fixed_fractional",
             "atr_stop": float(os.getenv("ENGINE_ATR_STOP", "1.5")),
             "rr": float(os.getenv("ENGINE_RR", "2")),
             "trail_atr": float(os.getenv("ENGINE_TRAIL_ATR", "1.0")),
             "confirm_min": int(os.getenv("ENGINE_CONFIRM_MIN", "3")),
             "pyramid_frac": float(os.getenv("ENGINE_PYRAMID_FRAC", "0.5")),
-            "max_pyramid": int(os.getenv("ENGINE_MAX_PYRAMID", "2")),
+            "max_pyramid": 0,
         }
 
         self.state: Dict[str, Any] = {
             "running": False, "last_bar": None, "signal": None,
             "error": None, "trades": 0, "status": "stopped",
             "log": [], "pyramid_count": 0,
+            "effective_strategy": None, "regime": None,
         }
 
         self.kronos_cache: Dict[str, Any] = {
@@ -129,7 +126,7 @@ class SymbolEngine:
 
     # ── Snapshot for API ──────────────────────────────────────────────────
     def snapshot(self) -> dict:
-        running = (self.config["enabled"]
+        running = (self.live_enabled and self.config["enabled"]
                    and self.state["status"] not in ("stopped", "disabled",
                                                      "mt5_offline", "halted",
                                                      "no_data"))
@@ -143,6 +140,8 @@ class SymbolEngine:
             "timeframe": self.config["timeframe"],
             "status": self.state["status"],
             "lastBar": self.state["last_bar"],
+            "effectiveStrategy": self.state.get("effective_strategy"),
+            "regime": self.state.get("regime"),
             "signal": self.state["signal"],
             "error": self.state["error"],
             "trades": self.state["trades"],
@@ -180,6 +179,25 @@ class SymbolEngine:
             },
         }
 
+    def _resolve_strategy(self, candles, ind) -> str:
+        """Return the strategy for this bar, selecting by regime when set to auto."""
+        configured = self.config["strategy"]
+        if configured != "auto":
+            self.state["effective_strategy"] = configured
+            self.state["regime"] = None
+            return configured
+        from regime import select_strategy
+        pool = [s.strip() for s in os.getenv("ENGINE_AUTO_POOL", "").split(",") if s.strip()]
+        strategy_id, regime = select_strategy(candles, ind, pool=pool or None)
+        previous = self.state.get("effective_strategy")
+        self.state["effective_strategy"] = strategy_id
+        self.state["regime"] = regime
+        if previous and previous != strategy_id:
+            self._log({"type": "strategy_switch", "from": previous,
+                       "to": strategy_id, "regime": regime["regime"],
+                       "bar": candles[-1]["time"]})
+        return strategy_id
+
     # ── Engine log helper ─────────────────────────────────────────────────
     def _log(self, entry: dict):
         entry["ts"] = int(time.time() * 1000)
@@ -193,8 +211,8 @@ class SymbolEngine:
                     "kronos_dir": 0, "confidence": 0.0}
 
         age_s = (time.time() * 1000 - self.kronos_cache["timestamp"]) / 1000.0
-        if age_s > self.kronos_poll * 5 or self.kronos_cache["error"]:
-            return {"ok": True, "reason": "Kronos stale — passing through",
+        if not self.kronos_ok or age_s > self.kronos_poll * 5 or self.kronos_cache["error"]:
+            return {"ok": False, "reason": "Kronos confirmation unavailable or stale",
                     "kronos_dir": 0, "confidence": 0.0}
 
         k_dir = self.kronos_cache["direction"]
@@ -217,34 +235,6 @@ class SymbolEngine:
                            f"{self.kronos_cache['pct_change']:+.2f}%"),
                 "kronos_dir": k_dir, "confidence": conf}
 
-    async def _portfolio_guard(self, proposed_lots: float, price: float, spec) -> dict:
-        """Cross-asset concentration guard measured in notional/equity."""
-        account = await asyncio.to_thread(self.mt5.account_info)
-        if account is None or float(account.equity) <= 0:
-            return {"allowed": False, "reason": "Account equity unavailable"}
-        equity = float(account.equity)
-        max_gross = float(os.getenv("MAX_GROSS_LEVERAGE", "3.0"))
-        max_symbol_pct = float(os.getenv("MAX_SYMBOL_NOTIONAL_PCT", "150"))
-        rows = list(await asyncio.to_thread(self.mt5.positions_get) or [])
-        gross = 0.0
-        symbol_notional = 0.0
-        for p in rows:
-            if getattr(p, "magic", None) != self.magic:
-                continue
-            pinfo = await asyncio.to_thread(self.mt5.symbol_info, p.symbol)
-            pspec = spec_from_info(p.symbol, pinfo) if pinfo else fallback_spec(p.symbol)
-            market = float(getattr(p, "price_current", 0.0) or getattr(p, "price_open", 0.0) or 0.0)
-            notional = abs(float(p.volume) * pspec.contract_size * market)
-            gross += notional
-            if p.symbol == self.symbol:
-                symbol_notional += notional
-        proposed = abs(float(proposed_lots) * spec.contract_size * float(price))
-        if gross + proposed > equity * max_gross:
-            return {"allowed": False, "reason": f"Gross exposure cap ({max_gross:.2f}x equity)"}
-        if symbol_notional + proposed > equity * (max_symbol_pct / 100.0):
-            return {"allowed": False, "reason": f"{self.symbol} concentration cap ({max_symbol_pct:.0f}% equity)"}
-        return {"allowed": True, "reason": "Portfolio exposure within limits"}
-
     def _external_trade_guard(self) -> dict:
         if not self.trade_guard:
             return {"allowed": True, "reason": "No external guard configured"}
@@ -258,8 +248,9 @@ class SymbolEngine:
         """Refresh today's realized P/L for this strategy/symbol from broker history."""
         if not self._mt5_ready["ok"] or not self.mt5:
             return
-        start = datetime.combine(datetime.now().date(), dtime.min)
-        deals = await asyncio.to_thread(self.mt5.history_deals_get, start, datetime.now()) or []
+        now = datetime.now(timezone.utc)
+        start = datetime.combine(now.date(), dtime.min, tzinfo=timezone.utc)
+        deals = await asyncio.to_thread(self.mt5.history_deals_get, start, now) or []
         self.risk.realized = sum(
             float(getattr(d, "profit", 0.0) or 0.0)
             + float(getattr(d, "commission", 0.0) or 0.0)
@@ -272,9 +263,7 @@ class SymbolEngine:
 
     # ── Trailing stop ─────────────────────────────────────────────────────
     async def _trail(self):
-        if self.risk.halted:
-            return
-        if not self.config["enabled"] or not self.live_enabled or not self._mt5_ready["ok"] or not self.mt5:
+        if not self.live_enabled or not self._mt5_ready["ok"] or not self.mt5:
             return
         if self.config["trail_atr"] <= 0:
             return
@@ -294,9 +283,20 @@ class SymbolEngine:
         candles = [{"open": float(r["open"]), "high": float(r["high"]),
                     "low": float(r["low"]), "close": float(r["close"])} for r in closed]
         av = _atr(candles, 14)
-        trail = max(av[-1] * self.config["trail_atr"], 0.1)
+        info = await asyncio.to_thread(self.mt5.symbol_info, self.symbol)
+        if info is None:
+            return
+        spec = spec_from_info(self.symbol, info)
+        trail = max(av[-1] * self.config["trail_atr"],
+                    max(info.trade_stops_level, info.trade_freeze_level) * spec.point + 2 * spec.tick_size)
         tick = await asyncio.to_thread(self.mt5.symbol_info_tick, self.symbol)
         if not tick:
+            return
+        try:
+            checked_tick(tick)
+        except ValueError:
+            # Stale/invalid quote (e.g. market closed): skip trailing this cycle
+            # instead of error-looping the engine task every few seconds.
             return
         for p in ours:
             is_long = p.type == self.mt5.POSITION_TYPE_BUY
@@ -314,291 +314,18 @@ class SymbolEngine:
             if moved is not None:
                 sl = normalize_price(moved, spec)
                 request = {"action": self.mt5.TRADE_ACTION_SLTP, "symbol": self.symbol,
-                           "position": p.ticket, "sl": round(moved, 2),
+                           "position": p.ticket, "sl": sl,
                            "tp": float(p.tp or 0.0), "type_time": self.mt5.ORDER_TIME_GTC}
                 result = await asyncio.to_thread(self.mt5.order_send, request)
                 if result and result.retcode == self.mt5.TRADE_RETCODE_DONE:
                     self._log({"type": "trail", "side": 1 if is_long else -1,
-                               "sl": round(moved, 2), "ticket": p.ticket})
+                               "sl": sl, "ticket": p.ticket})
 
     # ── Pyramiding ────────────────────────────────────────────────────────
-    async def _try_pyramid(self, candles, ind, ours, open_rows, bar):
-        if self.config["confirm_min"] <= 0 or self.config["max_pyramid"] <= 0:
-            return
-        pos = ours[0]
-        is_long = pos.type == self.mt5.POSITION_TYPE_BUY
-        count = int(self.state.get("pyramid_count", 0))
-        if count >= self.config["max_pyramid"]:
-            return
-        conf = _local_confirmations(candles, ind)
-        net = conf["bull"] - conf["bear"]
-        strong = (is_long and net >= self.config["confirm_min"]) or (
-            not is_long and -net >= self.config["confirm_min"]
-        )
-        if not strong:
-            return
-
-        pyramid_side = 1 if is_long else -1
-        external_guard = self._external_trade_guard()
-        if not external_guard["allowed"]:
-            self.state["status"] = "blackout"
-            self.state["error"] = external_guard["reason"]
-            self._log({"type": "blocked", "reason": external_guard["reason"], "bar": bar})
-            return
-        kronos_check = self._kronos_agrees(pyramid_side)
-        if not kronos_check["ok"]:
-            self._log({"type": "kronos_veto", "side": pyramid_side,
-                       "reason": f"Pyramid blocked: {kronos_check['reason']}", "bar": bar})
-            return
-
-        info = await asyncio.to_thread(self.mt5.symbol_info, self.symbol)
-        tick = await asyncio.to_thread(self.mt5.symbol_info_tick, self.symbol)
-        if not info or not tick:
-            return
-        spec = spec_from_info(self.symbol, info)
-        total_volume = sum(float(o.volume) for o in open_rows)
-        add = normalize_volume(
-            max(float(pos.volume) * self.config["pyramid_frac"], spec.volume_min),
-            spec,
-            self.max_lot,
-        )
-        sp_points = spread_points(tick.bid, tick.ask, spec)
-        decision = self.risk.check(add, len(open_rows), total_volume, sp_points)
-        if not decision["allowed"]:
-            self.state["error"] = "; ".join(decision["reasons"])
-            self._log({"type": "blocked", "reasons": decision["reasons"], "bar": bar})
-            return
-
-        price = normalize_price(tick.ask if is_long else tick.bid, spec)
-        portfolio = await self._portfolio_guard(add, price, spec)
-        if not portfolio["allowed"]:
-            self.state["status"] = "risk_blocked"
-            self.state["error"] = portfolio["reason"]
-            self._log({"type": "blocked", "reason": portfolio["reason"], "bar": bar})
-            return
-        order_type = self.mt5.ORDER_TYPE_BUY if is_long else self.mt5.ORDER_TYPE_SELL
-        request = {
-            "action": self.mt5.TRADE_ACTION_DEAL,
-            "symbol": self.symbol,
-            "volume": add,
-            "type": order_type,
-            "price": price,
-            "sl": normalize_price(float(pos.sl), spec) if pos.sl else 0.0,
-            "tp": normalize_price(float(pos.tp), spec) if pos.tp else 0.0,
-            "deviation": 20,
-            "magic": self.magic,
-            "comment": "AuricV3-Pyramid",
-            "type_time": self.mt5.ORDER_TIME_GTC,
-            "type_filling": choose_filling(self.mt5, spec),
-        }
-        check = await asyncio.to_thread(self.mt5.order_check, request)
-        if check is not None and getattr(check, "retcode", 0) not in (0, getattr(self.mt5, "TRADE_RETCODE_DONE", 10009)):
-            self.state["error"] = f"MT5 preflight rejected pyramid: {getattr(check, 'comment', 'unknown')}"
-            self._log({"type": "rejected", "reason": self.state["error"], "bar": bar})
-            return
-        result = await asyncio.to_thread(self.mt5.order_send, request)
-        if result is None or result.retcode != self.mt5.TRADE_RETCODE_DONE:
-            self.state["error"] = f"MT5 rejected pyramid: {getattr(result, 'comment', 'no response')}"
-            self._log({"type": "rejected", "reason": self.state["error"], "bar": bar})
-            return
-
-        self.state["pyramid_count"] = count + 1
-        self.state["trades"] += 1
-        self.state["error"] = None
-        self.journal.add(mode="live", symbol=self.symbol,
-                         side="buy" if is_long else "sell", lots=add,
-                         entry=result.price, strategy=self.config["strategy"],
-                         reason=f"Engine pyramid (conf {net:+d})", raw=dict(request))
-        self._log({"type": "pyramid", "side": pyramid_side, "lots": add,
-                   "price": result.price, "bar": bar, "ticket": result.order, "confirm": net})
-        await self.tg_notify(
-            f"<b>Auric PYRAMID</b> {'LONG' if is_long else 'SHORT'} {self.symbol}\n"
-            f"+{add} lots @ {result.price}\n"
-            f"Pyramid #{count + 1} | Ticket: {result.order}"
-        )
-
-    # ── Yahoo Finance paper trading fallback ─────────────────────────────
-    YAHOO_TICKERS = {
-        "XAUUSD": "GC=F", "BTCUSD": "BTC-USD",
-        "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X",
-        "USDJPY": "USDJPY=X", "EURJPY": "EURJPY=X",
-        "AUDUSD": "AUDUSD=X", "USDCAD": "USDCAD=X",
-        "USDCHF": "USDCHF=X", "NZDUSD": "NZDUSD=X",
-    }
-    YAHOO_INTERVALS = {"M1": "1m", "M5": "5m", "M15": "15m", "M30": "30m",
-                       "H1": "1h", "H4": "1h", "D1": "1d"}
-
-    async def _fetch_yahoo_candles(self) -> list:
-        try:
-            import yfinance as yf
-        except ImportError:
-            return []
-        ticker = self.YAHOO_TICKERS.get(self.symbol, self.symbol)
-        interval = self.YAHOO_INTERVALS.get(self.config["timeframe"], "15m")
-        try:
-            df = await asyncio.to_thread(
-                lambda: yf.Ticker(ticker).history(period="60d", interval=interval))
-            if df.empty:
-                return []
-            values = []
-            for idx, row in df.iterrows():
-                values.append({
-                    "time": int(idx.timestamp()),
-                    "open": float(row["Open"]),
-                    "high": float(row["High"]),
-                    "low": float(row["Low"]),
-                    "close": float(row["Close"]),
-                    "volume": float(row.get("Volume", 0) or 0),
-                })
-            # Last provider bar can still be forming; never trade from it.
-            return values[-321:-1] if len(values) > 1 else []
-        except Exception:
-            return []
-
-    async def _get_yahoo_price(self) -> float:
-        try:
-            import yfinance as yf
-        except ImportError:
-            return 0.0
-        ticker = self.YAHOO_TICKERS.get(self.symbol, self.symbol)
-        try:
-            info = await asyncio.to_thread(lambda: yf.Ticker(ticker).info)
-            price = float(info.get("regularMarketPrice", 0) or
-                          info.get("previousClose", 0) or 0)
-            if price <= 0:
-                hist = await asyncio.to_thread(lambda: yf.Ticker(ticker).history(period="1d"))
-                if not hist.empty:
-                    price = float(hist["Close"].iloc[-1])
-            return price
-        except Exception:
-            return 0.0
-
-    async def _step_yahoo(self):
-        """Paper/shadow engine using MT5 quotes when available, Yahoo otherwise."""
-        if not self.config["enabled"]:
-            self.state["status"] = "disabled"
-            return
-        if self.risk.halted:
-            self.state["status"] = "halted"
-            return
-
-        candles = []
-        source = "Yahoo"
-        info = None
-        tick = None
-        if self._mt5_ready["ok"] and self.mt5:
-            tf = self.mt5_timeframes.get(self.config["timeframe"])
-            if tf is not None:
-                rates = await asyncio.to_thread(self.mt5.copy_rates_from_pos, self.symbol, tf, 0, 321)
-                if rates is not None and len(rates) > 1:
-                    rates = rates[:-1]
-                    candles = [{"time": int(r["time"]), "open": float(r["open"]),
-                                "high": float(r["high"]), "low": float(r["low"]),
-                                "close": float(r["close"]), "volume": float(r["tick_volume"])}
-                               for r in rates]
-                    info = await asyncio.to_thread(self.mt5.symbol_info, self.symbol)
-                    tick = await asyncio.to_thread(self.mt5.symbol_info_tick, self.symbol)
-                    source = "MT5"
-        if not candles:
-            candles = await self._fetch_yahoo_candles()
-        if not candles:
-            self.state["status"] = "no_data"
-            return
-
-        bar = candles[-1]["time"]
-        if self.state["last_bar"] == bar:
-            return
-        self.state["last_bar"] = bar
-
-        from engine import indicators, signal as _signal
-        ind = indicators(candles)
-
-        if self._paper_position is not None:
-            pp = self._paper_position
-            x = candles[-1]
-            exit_price = None
-            why = ""
-            if pp["side"] > 0 and x["low"] <= pp["stop"]:
-                exit_price, why = pp["stop"], "Stop"
-            elif pp["side"] > 0 and x["high"] >= pp["target"]:
-                exit_price, why = pp["target"], "Target"
-            elif pp["side"] < 0 and x["high"] >= pp["stop"]:
-                exit_price, why = pp["stop"], "Stop"
-            elif pp["side"] < 0 and x["low"] <= pp["target"]:
-                exit_price, why = pp["target"], "Target"
-            if exit_price is not None:
-                spec = spec_from_info(self.symbol, info) if info else fallback_spec(self.symbol)
-                pnl = (exit_price - pp["entry"]) * pp["side"] * spec.contract_size * pp["lots"]
-                self.risk.realized += pnl
-                self.journal.add(mode="paper", symbol=self.symbol,
-                                 side="sell" if pp["side"] > 0 else "buy",
-                                 lots=pp["lots"], entry=pp["entry"], exit=exit_price, pnl=pnl,
-                                 strategy=self.config["strategy"],
-                                 reason=f"{source} paper exit: {why}",
-                                 raw={"symbol": self.symbol})
-                self._log({"type": "exit", "side": pp["side"], "lots": pp["lots"],
-                           "price": exit_price, "pnl": pnl, "bar": bar, "reason": why})
-                self._paper_position = None
-                self.state["status"] = "scanning"
-                return
-            self.state["status"] = "paper_position"
-            return
-
-        self.state["pyramid_count"] = 0
-        side, reason = _signal(self.config["strategy"], candles, len(candles) - 1, {}, ind)
-        self.state["signal"] = {"side": side, "reason": reason, "bar": bar, "mode": "paper"}
-        if side == 0:
-            self.state["status"] = "scanning"
-            return
-
-        self._log({"type": "signal", "side": side, "reason": reason, "bar": bar})
-        if not self.paper_enabled:
-            self.state["status"] = "shadow_signal"
-            self.state["error"] = None
-            return
-        if tick is not None:
-            price = float(tick.ask if side == 1 else tick.bid)
-        else:
-            price = await self._get_yahoo_price()
-        if price <= 0:
-            self.state["error"] = "Could not fetch paper execution price"
-            return
-
-        spec = spec_from_info(self.symbol, info) if info else fallback_spec(self.symbol)
-        price = normalize_price(price, spec)
-        av = ind["av"]
-        dist = max(av[-1] * self.config["atr_stop"], 0.1)
-        equity = 10000.0
-        size = position_size(self.config["sizer"], equity,
-                             self.config["risk_pct"], dist, price, state={})
-        size = round(min(max(size, 0.01), self.max_lot), 2)
-
-        stop = price - dist * side
-        target = price + dist * self.config["rr"] * side
-
-        self.state["trades"] += 1
-        self.state["status"] = "paper_position"
-        self.state["error"] = None
-        self._paper_position = {
-            "side": side, "entry": price, "stop": stop,
-            "target": target, "lots": size, "bar": bar,
-        }
-        self.journal.add(mode="paper", symbol=self.symbol,
-                         side="buy" if side == 1 else "sell",
-                         lots=size, entry=price, strategy=self.config["strategy"],
-                         reason=f"{source} paper: {reason}",
-                         raw={"symbol": self.symbol, "stop": stop, "target": target})
-        self._log({"type": "entry", "side": side, "lots": size, "price": price,
-                   "bar": bar, "stop": stop, "target": target, "ticket": f"PAPER-{bar}"})
-
-    # ── Main engine step ──────────────────────────────────────────────────
     async def _step(self):
         """Evaluate the last CLOSED candle and, when armed, submit a guarded live order."""
         if not self.config["enabled"]:
             self.state["status"] = "disabled"
-            return
-        if not self.live_enabled:
-            self.state["status"] = "paper_only"
             return
         if not self._mt5_ready["ok"] or not self.mt5:
             self.state["status"] = "mt5_offline"
@@ -628,32 +355,60 @@ class SymbolEngine:
             self.state["status"] = "no_data"
             return
         # MT5 position 0 is the forming candle. It must never generate an entry.
-        rates = rates[:-1]
-        candles = [{"time": int(r["time"]), "open": float(r["open"]),
-                    "high": float(r["high"]), "low": float(r["low"]),
-                    "close": float(r["close"]), "volume": float(r["tick_volume"])}
-                   for r in rates]
+        candles = checked_bars(rates[:-1])
+        tick = await asyncio.to_thread(self.mt5.symbol_info_tick, self.symbol)
+        checked_tick(tick)
         bar = candles[-1]["time"]
+        seconds = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800,
+                   "H1": 3600, "H4": 14400, "D1": 86400, "W1": 604800}.get(self.config["timeframe"])
+        if seconds is None or not seconds <= time.time() - bar <= seconds * 2 + 30:
+            # Market closed (weekend/holiday) or clock skew: wait quietly.
+            # Raising here would flap the engine to "blocked" every 3 seconds.
+            self.state["status"] = "market_closed"
+            return
         if self.state["last_bar"] == bar:
             return
         self.state["last_bar"] = bar
 
         from engine import indicators, signal as _signal
         ind = indicators(candles)
-        open_rows = list(await asyncio.to_thread(self.mt5.positions_get, symbol=self.symbol) or [])
+        rows = await asyncio.to_thread(self.mt5.positions_get, symbol=self.symbol)
+        if rows is None:
+            raise ValueError("MT5 positions unavailable")
+        open_rows = list(rows)
         ours = [p for p in open_rows if p.magic == self.magic]
         if ours:
             self.state["status"] = "in_position"
-            await self._try_pyramid(candles, ind, ours, open_rows, bar)
+            # One protected position per symbol; no risk-increasing pyramids.
             return
 
         self.state["pyramid_count"] = 0
-        side, reason = _signal(self.config["strategy"], candles, len(candles) - 1, {}, ind)
-        self.state["signal"] = {"side": side, "reason": reason, "bar": bar, "mode": "live_auto"}
+        strategy_id = self._resolve_strategy(candles, ind)
+        side, reason = _signal(strategy_id, candles, len(candles) - 1, {}, ind)
+        self.state["signal"] = {"side": side, "reason": reason, "bar": bar,
+                                "strategy": strategy_id,
+                                "mode": "live_auto" if self.live_enabled else "shadow"}
         if side == 0:
             self.state["status"] = "scanning"
             return
-        self._log({"type": "signal", "side": side, "reason": reason, "bar": bar})
+        self._log({"type": "signal", "side": side, "reason": reason,
+                   "strategy": strategy_id, "bar": bar})
+
+        from trade_quality import assess_setup
+        higher = {"M1": "M15", "M5": "H1", "M15": "H1", "M30": "H4",
+                  "H1": "H4", "H4": "D1", "D1": "W1", "W1": "W1"}[self.config["timeframe"]]
+        higher_tf = self.mt5_timeframes.get(higher)
+        if higher_tf is None:
+            raise ValueError("Higher-timeframe MT5 context unavailable")
+        higher_rates = await asyncio.to_thread(self.mt5.copy_rates_from_pos, self.symbol, higher_tf, 1, 80)
+        context = checked_bars(higher_rates, minimum=50)
+        quality = assess_setup(candles, context, side, self.config["rr"], tick.ask - tick.bid)
+        self.state["signal"]["quality"] = quality
+        if not quality["allowed"]:
+            self.state["status"] = "quality_blocked"
+            self.state["error"] = quality["reason"]
+            self._log({"type": "blocked", "reason": quality["reason"], "bar": bar})
+            return
 
         external_guard = self._external_trade_guard()
         self.state["signal"]["externalGuard"] = external_guard
@@ -672,78 +427,33 @@ class SymbolEngine:
                        "reason": kronos_check["reason"], "bar": bar})
             return
 
-        account = await asyncio.to_thread(self.mt5.account_info)
-        tick = await asyncio.to_thread(self.mt5.symbol_info_tick, self.symbol)
-        if account is None or tick is None:
-            self.state["error"] = "Account or tick unavailable"
+        if not self.live_enabled:
+            self.state["status"] = "shadow"
+            self.state["error"] = "Signal evaluated on MT5 data; live execution is disarmed"
             return
-
-        price = normalize_price(tick.ask if side == 1 else tick.bid, spec)
-        av = ind["av"]
-        dist = max(av[-1] * self.config["atr_stop"], 0.1)
-        size = position_size(self.config["sizer"], float(account.equity),
-                             self.config["risk_pct"], dist, float(candles[-1]["close"]), state={})
-        size = round(min(max(size, 0.01), self.max_lot), 2)
-        exposure = sum(float(p.volume) for p in open_rows)
-        sp_points = spread_points(tick.bid, tick.ask, spec)
-        decision = self.risk.check(size, len(open_rows), exposure, sp_points)
-        if not decision["allowed"]:
-            self.state["error"] = "; ".join(decision["reasons"])
-            self.state["status"] = "risk_blocked"
-            self._log({"type": "blocked", "reasons": decision["reasons"],
-                       "spreadPoints": sp_points, "bar": bar})
-            return
-        portfolio = await self._portfolio_guard(size, price, spec)
-        if not portfolio["allowed"]:
-            self.state["error"] = portfolio["reason"]
-            self.state["status"] = "risk_blocked"
-            self._log({"type": "blocked", "reason": portfolio["reason"], "bar": bar})
-            return
-        price = tick.ask if side == 1 else tick.bid
-        stop = price - dist * side
-        target = price + dist * self.config["rr"] * side
-        order_type = self.mt5.ORDER_TYPE_BUY if side == 1 else self.mt5.ORDER_TYPE_SELL
-        request = {"action": self.mt5.TRADE_ACTION_DEAL, "symbol": self.symbol, "volume": size,
-                   "type": order_type, "price": price, "sl": round(stop, 2),
-                   "tp": round(target, 2), "deviation": 20, "magic": self.magic,
-                   "comment": "AuricEngine", "type_time": self.mt5.ORDER_TIME_GTC,
-                   "type_filling": self.mt5.ORDER_FILLING_IOC}
-        result = await asyncio.to_thread(self.mt5.order_send, request)
-        if result is None or result.retcode != self.mt5.TRADE_RETCODE_DONE:
-            self.state["error"] = f"MT5 rejected order: {getattr(result, 'comment', 'no response')}"
-            self.state["status"] = "rejected"
-            self._log({"type": "rejected", "reason": self.state["error"], "bar": bar})
-            return
-
+        if self.executor is None:
+            raise ValueError("Autonomous executor is not configured")
+        distance = float(ind["av"][-1]) * self.config["atr_stop"]
+        result = await self.executor.submit(self, side, distance, bar)
         self.state["trades"] += 1
         self.state["status"] = "in_position"
         self.state["error"] = None
-        self.journal.add(mode="live", symbol=self.symbol,
-                         side="buy" if side == 1 else "sell", lots=size,
-                         entry=result.price, strategy=self.config["strategy"],
-                         reason=f"Engine {reason}", raw=dict(request))
-        self._log({"type": "entry", "side": side, "lots": size, "price": result.price,
-                   "bar": bar, "ticket": result.order, "spreadPoints": sp_points})
-        await self.tg_notify(
-            f"<b>Auric V2 ENTRY</b> {'LONG' if side == 1 else 'SHORT'} {self.symbol}\n"
-            f"Lots: {size} | Price: {result.price}\n"
-            f"SL: {round(stop, 2)} | TP: {round(target, 2)}\n"
-            f"Strategy: {self.config['strategy']}{kronos_str}\n"
-            f"Ticket: {result.order}")
+        self._log({"type": "entry", "side": side, "lots": result.volume,
+                   "price": result.price, "bar": bar, "ticket": result.order})
 
     # ── Background loops ──────────────────────────────────────────────────
     async def run_engine_loop(self):
         while True:
             try:
-                if self._mt5_ready["ok"] and self.mt5 and self.live_enabled:
+                if self._mt5_ready["ok"] and self.mt5:
                     await self._trail()
                     await self._step()
                 else:
-                    # Auto-live is an independent server gate. When it is off,
-                    # keep the engine useful by running the same strategy in paper mode.
-                    await self._step_yahoo()
+                    self.state["status"] = "mt5_offline" if not self._mt5_ready["ok"] else "disarmed"
+                    self.state["error"] = "MT5 connection and autonomous execution stage required"
             except Exception as exc:
                 self.state["error"] = str(exc)
+                self.state["status"] = "blocked"
                 logger.warning("[%s] engine error: %s", self.symbol, exc)
             await asyncio.sleep(3)
 
@@ -759,7 +469,7 @@ class SymbolEngine:
                     candles = None
                     if self._mt5_ready["ok"] and self.mt5:
                         tf = self.mt5_timeframes.get(self.config["timeframe"])
-                        if tf:
+                        if tf is not None:
                             rates = await asyncio.to_thread(
                                 self.mt5.copy_rates_from_pos, self.symbol, tf,
                                 0, self.kronos_lookback + 50)
@@ -769,12 +479,9 @@ class SymbolEngine:
                                      "high": float(r["high"]), "low": float(r["low"]),
                                      "close": float(r["close"]),
                                      "volume": float(r["tick_volume"])}
-                                    for r in rates
+                                    for r in rates[:-1]
                                 ]
-                    else:
-                        candles = await self._fetch_yahoo_candles()
-                        if len(candles) < self.kronos_lookback + 1:
-                            candles = None
+
 
                     if candles:
                         result = await asyncio.to_thread(

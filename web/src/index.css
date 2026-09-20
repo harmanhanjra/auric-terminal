@@ -1,55 +1,57 @@
 @import "tailwindcss";
 
 @theme {
-  /* AuricTerminal — clean dark palette (reliable + beautiful) */
-  --color-ink-950: #05070b;
-  --color-ink-900: #090d13;
-  --color-ink-800: #0e141d;
-  --color-ink-700: #1b2634;
-  --color-ink-600: #2a394c;
-  --color-fg-100: #e8e8ec;
-  --color-fg-200: #c5cad4;
-  --color-fg-300: #a8b0c0;
-  --color-fg-400: #8a93a8;
-  --color-fg-500: #6b748a;
-  --color-fg-600: #4d5668;
-  --color-gold-400: #c9a227;
-  --color-gold-300: #debe5a;
-  --color-gold-600: #8a6e1a;
-  --color-bull-300: #6ee7b7;
-  --color-bull-400: #34d399;
-  --color-bull-500: #16c784;
-  --color-bear-300: #fda4af;
-  --color-bear-400: #fb7185;
-  --color-bear-500: #ea3943;
-  --color-bull: #16c784;
-  --color-bear: #ea3943;
-  --color-background: #06080f;
-  --color-background-alt: #0a0e1a;
-  --color-background-muted: #0f1220;
-  --color-foreground: #e8e8ec;
-  --color-foreground-muted: #8a93a8;
-  --color-foreground-dim: #1e2540;
-  --color-accent: #c9a227;
-  --color-accent-muted: #8a6e1a;
-  --color-status-ok: #16c784;
-  --color-status-warning: #c9a227;
-  --color-status-error: #ea3943;
-  --color-status-disabled: #6b748a;
-  --color-card: #0b1018;
-  --color-card-foreground: #e8e8ec;
-  --color-popover: #0b1018;
-  --color-popover-foreground: #e8e8ec;
-  --color-primary: #d2ad3d;
-  --color-primary-foreground: #090d13;
-  --color-secondary: #121923;
-  --color-secondary-foreground: #c5cad4;
-  --color-muted: #111821;
-  --color-muted-foreground: #7e899c;
-  --color-border: #202b39;
-  --color-input: #202b39;
-  --color-ring: #d2ad3d;
-  --color-destructive: #ea3943;
+  /* AuricTerminal — near-monochrome terminal palette.
+     Color is reserved for P/L (bull/bear) and alerts; the "gold" ramp is
+     intentionally neutral so existing accent usage reads as a light gray. */
+  --color-ink-950: #0a0a0b;
+  --color-ink-900: #0e0e10;
+  --color-ink-800: #131316;
+  --color-ink-700: #1c1c20;
+  --color-ink-600: #26262b;
+  --color-fg-100: #ededf0;
+  --color-fg-200: #c3c3ca;
+  --color-fg-300: #9a9aa2;
+  --color-fg-400: #75757d;
+  --color-fg-500: #58585f;
+  --color-fg-600: #414147;
+  --color-gold-400: #d6d6db;
+  --color-gold-300: #e8e8ec;
+  --color-gold-600: #6f6f76;
+  --color-bull-300: #7ee2a0;
+  --color-bull-400: #4ecb71;
+  --color-bull-500: #3fb950;
+  --color-bear-300: #ff9d95;
+  --color-bear-400: #f76a60;
+  --color-bear-500: #e5484d;
+  --color-bull: #3fb950;
+  --color-bear: #e5484d;
+  --color-background: #0a0a0b;
+  --color-background-alt: #0e0e10;
+  --color-background-muted: #131316;
+  --color-foreground: #ededf0;
+  --color-foreground-muted: #9a9aa2;
+  --color-foreground-dim: #26262b;
+  --color-accent: #d6d6db;
+  --color-accent-muted: #6f6f76;
+  --color-status-ok: #3fb950;
+  --color-status-warning: #d6d6db;
+  --color-status-error: #e5484d;
+  --color-status-disabled: #58585f;
+  --color-card: #101013;
+  --color-card-foreground: #ededf0;
+  --color-popover: #131316;
+  --color-popover-foreground: #ededf0;
+  --color-primary: #e8e8ec;
+  --color-primary-foreground: #0a0a0b;
+  --color-secondary: #17171a;
+  --color-secondary-foreground: #c3c3ca;
+  --color-muted: #141417;
+  --color-muted-foreground: #85858d;
+  --color-border: #232327;
+  --color-input: #232327;
+  --color-ring: #d6d6db;
+  --color-destructive: #e5484d;
 
   --font-sans: "Geist", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "Geist Mono", "JetBrains Mono", ui-monospace, "SF Mono", Consolas, monospace;
@@ -72,7 +74,7 @@ body,
   color: var(--color-fg-200);
   font-family: var(--font-sans);
   font-size: 14px;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.011em;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   margin: 0;
@@ -81,8 +83,8 @@ body,
 
 :root {
   color-scheme: dark;
-  --auric-radius: 10px;
-  --auric-shadow: 0 18px 60px rgba(0, 0, 0, 0.34);
+  --auric-radius: 12px;
+  --auric-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
 }
 
 #root {
@@ -95,45 +97,51 @@ body,
 [data-numeric] {
   font-family: var(--font-mono) !important;
   font-variant-numeric: tabular-nums;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.01em;
 }
 
 /* Scrollbars */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background-color: var(--color-ink-700);
-  border-radius: 3px;
+  background-color: #2a2a2f;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: #3a3a40;
+  background-clip: padding-box;
 }
 ::-webkit-scrollbar-track {
   background-color: transparent;
 }
 
 @keyframes flash-green {
-  0% { color: var(--color-bull-500); text-shadow: 0 0 10px rgba(22,199,132,0.5); }
-  100% { color: inherit; text-shadow: none; }
+  0% { color: var(--color-bull-500); }
+  100% { color: inherit; }
 }
 @keyframes flash-red {
-  0% { color: var(--color-bear-500); text-shadow: 0 0 10px rgba(234,57,67,0.5); }
-  100% { color: inherit; text-shadow: none; }
+  0% { color: var(--color-bear-500); }
+  100% { color: inherit; }
 }
 @keyframes pulse-dot {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.6; transform: scale(0.85); }
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
 }
 
-.animate-flash-up { animation: flash-green 0.45s ease-out; }
-.animate-flash-down { animation: flash-red 0.45s ease-out; }
-.pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+.animate-flash-up { animation: flash-green 0.5s ease-out; }
+.animate-flash-down { animation: flash-red 0.5s ease-out; }
+.pulse-dot { animation: pulse-dot 2.4s ease-in-out infinite; }
 
-/* Beautiful card elevation */
+/* Card elevation — flat and quiet */
 .card {
-  background: linear-gradient(180deg, rgba(15,18,32,0.9), rgba(10,14,26,0.95));
-  border: 1px solid rgba(30,37,64,0.8);
-  border-radius: 10px;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.04);
+  background: var(--color-card);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--auric-radius);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.02);
 }
 
 /* Focus ring — reliable a11y */
@@ -146,7 +154,7 @@ body,
 .tooltip .tooltip-text {
   visibility: hidden;
   width: 220px;
-  background-color: var(--color-ink-900);
+  background-color: var(--color-ink-800);
   color: var(--color-fg-100);
   border-radius: 8px;
   padding: 8px 10px;
@@ -157,9 +165,9 @@ body,
   margin-left: -110px;
   opacity: 0;
   transition: opacity 0.2s;
-  border: 1px solid var(--color-ink-700);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   font-size: 11px;
-  box-shadow: 0 12px 32px rgba(0,0,0,0.5);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
 }
 .tooltip:hover .tooltip-text { visibility: visible; opacity: 1; }
 
@@ -167,195 +175,96 @@ button, [role="button"], a { cursor: pointer; }
 
 [id^="modal-"].open { display: flex !important; }
 
-
-/* V2 workstation treatment: subtle spatial grid, not decorative glass. */
+/* Quiet spatial grid, no decorative glass. */
 .terminal-grid {
   background-image:
-    linear-gradient(rgba(255,255,255,0.012) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255,255,255,0.012) 1px, transparent 1px);
-  background-size: 32px 32px;
+    linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
+  background-size: 40px 40px;
 }
 
 .panel-surface {
-  background: linear-gradient(180deg, rgba(14,20,29,.94), rgba(9,13,19,.98));
-  border: 1px solid rgba(27,38,52,.92);
+  background: var(--color-card);
+  border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 ::selection {
-  background: rgba(201, 162, 39, .22);
+  background: rgba(255, 255, 255, 0.14);
   color: var(--color-fg-100);
 }
 
-
 /* -------------------------------------------------------------------------- */
-/* Auric Premium UI system                                                     */
-/* shadcn-style tokens + React Bits / Motion Primitives / Magic UI inspiration */
+/* Auric minimal UI system                                                     */
 /* -------------------------------------------------------------------------- */
 
 .auric-shell {
   background:
-    radial-gradient(circle at 12% -8%, rgba(201, 162, 39, 0.055), transparent 27%),
-    radial-gradient(circle at 88% 8%, rgba(76, 201, 240, 0.035), transparent 22%),
-    #05070b;
+    radial-gradient(1100px 520px at 50% -12%, rgba(255, 255, 255, 0.028), transparent 60%),
+    var(--color-ink-950);
 }
 
 .terminal-workspace {
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.018);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
 }
 
 .auric-topbar {
-  background:
-    linear-gradient(180deg, rgba(9, 13, 19, .94), rgba(5, 7, 11, .90));
-  border-bottom-color: rgba(255,255,255,.065);
-  box-shadow: 0 10px 36px rgba(0,0,0,.28), inset 0 -1px 0 rgba(255,255,255,.015);
+  background: rgba(10, 10, 11, 0.86);
+  backdrop-filter: blur(16px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .auric-side-panel {
-  box-shadow: inset 1px 0 0 rgba(255,255,255,.018);
+  background: rgba(12, 12, 14, 0.7);
+  border-left: 1px solid rgba(255, 255, 255, 0.055);
 }
 
 .auric-surface {
-  background:
-    linear-gradient(180deg, rgba(15, 21, 30, .92), rgba(8, 12, 18, .94));
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.035);
-}
-
-.auric-surface::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background: linear-gradient(115deg, rgba(255,255,255,.025), transparent 20%, transparent 78%, rgba(201,162,39,.025));
+  position: relative;
+  background: var(--color-card);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.015);
 }
 
 .auric-surface-elevated {
-  box-shadow:
-    0 22px 70px rgba(0,0,0,.42),
-    inset 0 1px 0 rgba(255,255,255,.045);
+  box-shadow: var(--auric-shadow), 0 0 0 1px rgba(255, 255, 255, 0.03);
 }
 
 .auric-surface-interactive {
-  transition: border-color 180ms ease, transform 180ms ease, box-shadow 180ms ease;
+  transition: border-color 160ms ease, background-color 160ms ease;
 }
 
 .auric-surface-interactive:hover {
-  transform: translateY(-1px);
-  border-color: rgba(222,190,90,.18);
-  box-shadow:
-    0 18px 48px rgba(0,0,0,.34),
-    0 0 0 1px rgba(201,162,39,.035),
-    inset 0 1px 0 rgba(255,255,255,.045);
+  border-color: rgba(255, 255, 255, 0.13);
+  background: #151518;
 }
 
 .auric-control {
   -webkit-tap-highlight-color: transparent;
 }
 
-.auric-rail-item::after {
-  content: "";
-  position: absolute;
-  inset: 6px;
-  border-radius: 9px;
-  opacity: 0;
-  background: radial-gradient(circle at 50% 30%, rgba(201,162,39,.12), transparent 68%);
-  transition: opacity 180ms ease;
-  pointer-events: none;
+.auric-rail-item {
+  position: relative;
+  transition: background-color 160ms ease, color 160ms ease;
 }
 
-.auric-rail-item:hover::after,
-.auric-rail-item[data-active="true"]::after {
-  opacity: 1;
-}
-
+/* Backdrop is now intentionally a single calm gradient (no orbs/beams/noise). */
 .auric-backdrop {
   opacity: 1;
 }
 
-.auric-orb {
-  position: absolute;
-  width: 40vw;
-  height: 40vw;
-  border-radius: 999px;
-  filter: blur(90px);
-  opacity: .08;
-  will-change: transform;
-}
-
-.auric-orb-gold {
-  top: -24vw;
-  left: 8vw;
-  background: rgba(215, 177, 61, .8);
-  animation: auric-orbit-a 18s ease-in-out infinite alternate;
-}
-
-.auric-orb-cyan {
-  top: -18vw;
-  right: -12vw;
-  background: rgba(76, 201, 240, .45);
-  animation: auric-orbit-b 24s ease-in-out infinite alternate;
-}
-
-.auric-beam {
-  position: absolute;
-  width: 46vw;
-  height: 1px;
-  opacity: .16;
-  background: linear-gradient(90deg, transparent, rgba(222,190,90,.55), transparent);
-  filter: blur(.2px);
-  transform-origin: center;
-}
-
-.auric-beam-one {
-  top: 17%;
-  left: 9%;
-  transform: rotate(-17deg);
-  animation: auric-beam-drift 14s ease-in-out infinite alternate;
-}
-
-.auric-beam-two {
-  right: 4%;
-  bottom: 12%;
-  transform: rotate(13deg);
-  opacity: .08;
-  animation: auric-beam-drift 19s ease-in-out infinite alternate-reverse;
+.auric-orb,
+.auric-beam,
+.auric-noise {
+  display: none;
 }
 
 .auric-vignette {
   position: absolute;
   inset: 0;
-  background:
-    radial-gradient(circle at 50% 22%, transparent 0, transparent 34%, rgba(0,0,0,.18) 78%, rgba(0,0,0,.48) 100%);
-}
-
-.auric-noise {
-  position: absolute;
-  inset: 0;
-  opacity: .028;
-  background-image:
-    repeating-radial-gradient(circle at 17% 21%, rgba(255,255,255,.45) 0 0.45px, transparent .55px 3px);
-  background-size: 7px 7px;
-  mix-blend-mode: soft-light;
-}
-
-@keyframes auric-orbit-a {
-  from { transform: translate3d(-2%, -2%, 0) scale(.96); }
-  to { transform: translate3d(10%, 12%, 0) scale(1.08); }
-}
-
-@keyframes auric-orbit-b {
-  from { transform: translate3d(4%, -4%, 0) scale(1); }
-  to { transform: translate3d(-10%, 8%, 0) scale(1.12); }
-}
-
-@keyframes auric-beam-drift {
-  from { translate: -3% -2%; opacity: .07; }
-  50% { opacity: .16; }
-  to { translate: 5% 4%; opacity: .09; }
+  background: radial-gradient(120% 90% at 50% 0%, transparent 40%, rgba(0, 0, 0, 0.32) 100%);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .auric-orb,
-  .auric-beam,
   .pulse-dot,
   .animate-flash-up,
   .animate-flash-down {
@@ -370,13 +279,13 @@ button, [role="button"], a { cursor: pointer; }
 
 @media (max-width: 1180px) {
   .terminal-workspace {
-    grid-template-columns: 58px minmax(0, 1fr) 340px !important;
+    grid-template-columns: 56px minmax(0, 1fr) 340px !important;
   }
 }
 
 @media (max-width: 920px) {
   .terminal-workspace {
-    grid-template-columns: 54px minmax(0, 1fr) !important;
+    grid-template-columns: 52px minmax(0, 1fr) !important;
   }
 
   .auric-side-panel {
@@ -384,44 +293,29 @@ button, [role="button"], a { cursor: pointer; }
   }
 }
 
-
 /* Workspace controls and panel resizing */
 .auric-resize-handle {
   position: relative;
-  background: rgba(255,255,255,.028);
+  background: transparent;
   transition: background-color 160ms ease;
   touch-action: none;
   z-index: 25;
 }
 
-.auric-resize-handle::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  opacity: 0;
-  background: linear-gradient(180deg, transparent, rgba(222,190,90,.34), transparent);
-  transition: opacity 160ms ease;
-}
-
 .auric-resize-handle:hover,
 .auric-resize-handle:active {
-  background: rgba(201,162,39,.08);
-}
-
-.auric-resize-handle:hover::after,
-.auric-resize-handle:active::after {
-  opacity: 1;
+  background: rgba(255, 255, 255, 0.07);
 }
 
 .auric-resize-vertical {
   width: 5px;
   cursor: col-resize;
-  border-inline: 1px solid rgba(255,255,255,.035);
 }
 
 .auric-resize-horizontal {
+  height: 5px;
   cursor: row-resize;
-  border-block: 1px solid rgba(255,255,255,.035);
+  width: 100%;
 }
 
 .auric-float-control {
@@ -430,36 +324,33 @@ button, [role="button"], a { cursor: pointer; }
   align-items: center;
   gap: 6px;
   border-radius: 9px;
-  border: 1px solid rgba(255,255,255,.07);
-  background: rgba(8,12,18,.84);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(18, 18, 21, 0.86);
   padding-inline: 10px;
   color: var(--color-fg-400);
-  font-size: 9px;
-  font-weight: 750;
-  text-transform: uppercase;
-  letter-spacing: .08em;
-  box-shadow: 0 10px 30px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.035);
-  backdrop-filter: blur(18px);
-  transition: border-color 160ms ease, background-color 160ms ease, color 160ms ease, transform 160ms ease;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(16px);
+  transition: border-color 160ms ease, background-color 160ms ease, color 160ms ease;
 }
 
 .auric-float-control:hover {
-  transform: translateY(-1px);
-  border-color: rgba(255,255,255,.12);
-  background: rgba(15,21,30,.92);
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(26, 26, 30, 0.94);
   color: var(--color-fg-100);
 }
 
 .auric-float-control-premium {
-  border-color: rgba(222,190,90,.18);
-  background: rgba(201,162,39,.07);
-  color: var(--color-gold-300);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: var(--color-fg-200);
 }
 
 .auric-layout-button {
   display: grid;
-  width: 28px;
-  height: 26px;
+  width: 30px;
+  height: 28px;
   place-items: center;
   border-radius: 7px;
   color: var(--color-fg-500);
@@ -467,13 +358,14 @@ button, [role="button"], a { cursor: pointer; }
 }
 
 .auric-layout-button:hover {
-  background: rgba(255,255,255,.05);
+  background: rgba(255, 255, 255, 0.06);
   color: var(--color-fg-100);
 }
 
 .auric-chart-toolbar {
-  background: linear-gradient(180deg, rgba(12,17,24,.88), rgba(8,12,18,.74));
-  box-shadow: inset 0 -1px 0 rgba(255,255,255,.025);
+  background: rgba(12, 12, 14, 0.82);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .auric-toolbar-group {
@@ -481,53 +373,50 @@ button, [role="button"], a { cursor: pointer; }
   align-items: center;
   gap: 2px;
   padding: 3px;
-  border: 1px solid rgba(255,255,255,.055);
+  border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 9px;
-  background: rgba(0,0,0,.16);
+  background: rgba(255, 255, 255, 0.015);
 }
 
 .auric-toolbar-button {
   display: inline-flex;
-  min-width: 28px;
+  min-width: 30px;
   height: 26px;
   align-items: center;
   justify-content: center;
   gap: 5px;
   border-radius: 7px;
-  padding-inline: 7px;
+  padding-inline: 8px;
   color: var(--color-fg-500);
-  font-size: 9px;
-  font-weight: 700;
-  transition: background-color 150ms ease, color 150ms ease, box-shadow 150ms ease;
+  font-size: 10px;
+  font-weight: 600;
+  transition: background-color 150ms ease, color 150ms ease;
 }
 
 .auric-toolbar-button:hover {
-  background: rgba(255,255,255,.045);
+  background: rgba(255, 255, 255, 0.05);
   color: var(--color-fg-200);
 }
 
 .auric-toolbar-button[data-active="true"] {
-  background: rgba(201,162,39,.09);
-  color: var(--color-gold-300);
-  box-shadow: inset 0 0 0 1px rgba(222,190,90,.12);
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--color-fg-100);
 }
 
 .auric-data-overlay {
-  border: 1px solid rgba(255,255,255,.06);
-  background: rgba(7,10,15,.74);
-  box-shadow: 0 12px 32px rgba(0,0,0,.26), inset 0 1px 0 rgba(255,255,255,.03);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(14, 14, 16, 0.82);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.34);
   backdrop-filter: blur(16px);
 }
 
 .auric-field {
-  border: 1px solid rgba(255,255,255,.065);
-  background: rgba(0,0,0,.18);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.02);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .auric-field:focus-within {
-  border-color: rgba(222,190,90,.28);
-  background: rgba(0,0,0,.26);
+  border-color: rgba(255, 255, 255, 0.2);
 }
 
 @media (max-width: 920px) {

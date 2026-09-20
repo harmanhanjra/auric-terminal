@@ -40,11 +40,11 @@ export function useMarketFeed(intervalMs = 4000): UseMarketFeedResult {
         try {
           const m = JSON.parse(e.data)
           if (m.type === 'tick' && typeof m.symbol === 'string') {
-            lastTickRef.current = Date.now()
+            lastTickRef.current = m.timestamp
             const q = m as Quote
             setTick(q)
-            setTicks((prev) => (prev[q.symbol]?.timestamp === q.timestamp ? prev : { ...prev, [q.symbol]: q }))
-            setStatus('live')
+            setTicks((prev) => ({ ...prev, [q.symbol]: q }))
+            setStatus(q.price > 0 && Date.now() - q.timestamp < 15000 ? 'live' : 'delayed')
           }
         } catch {
           /* ignore malformed frame */

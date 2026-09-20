@@ -98,6 +98,7 @@ export interface SymbolSummary {
 }
 
 export const api = {
+  depth: (symbol: string) => request<{available: boolean; levels: {side: string; price: number; volume: number}[]}>(`/api/depth/${encodeURIComponent(symbol)}`),
   health: () => request<Health>('/api/health'),
   login: (username: string, password: string) =>
     request<LoginResult>('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
